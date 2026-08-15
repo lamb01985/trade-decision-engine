@@ -6,6 +6,7 @@
   <title>Trade Decision Engine</title>
   <link rel="stylesheet" href="/static/styles.css">
   <link rel="stylesheet" href="/static/playbook.css">
+  <link rel="stylesheet" href="/static/readability.css">
 </head>
 <body>
   <div class="app-shell">
@@ -38,6 +39,8 @@
       <button id="refresh" class="refresh-button">Refresh analysis</button>
     </nav>
 
+    <div id="global-market-status" class="global-market-status loading" role="status" aria-live="polite"><span class="status-dot"></span><strong>CHECKING MARKET DATA</strong><small>Loading the latest available context…</small></div>
+
     <div class="safety-rail">
       <div><span class="rail-label">SAFETY RAIL</span><strong>Thesis is not a trade.</strong> A score, touch, or bias never authorizes an entry on its own.</div>
       <div class="rail-steps"><span>Structure</span><i></i><span>Confirmation</span><i></i><span>Risk check</span></div>
@@ -66,7 +69,7 @@
       </section>
 
       <section id="levels" class="view">
-        <div class="section-head page-head levels-page-head"><div><span class="section-kicker">FULL STRUCTURAL MAP</span><h2><span id="levels-symbol">QQQ</span> decision battlefield</h2><p class="muted">Every displayed price comes from the current analysis. Setup levels are emphasized; structural levels remain context.</p></div><button id="back-to-plan" class="secondary">Back to trade plan →</button></div>
+        <div class="section-head page-head levels-page-head"><div><span class="section-kicker">FULL STRUCTURAL MAP</span><h2><span id="levels-symbol">QQQ</span> decision battlefield</h2><p class="muted">Every displayed price comes from the latest analysis. Setup levels are emphasized; structural levels remain context.</p></div><button id="back-to-plan" class="secondary">Back to trade plan →</button></div>
         <div id="levels-status" class="levels-status loading">Load analysis to map levels.</div>
         <div id="level-groups" class="level-groups"></div>
         <section class="full-levels-workspace">
@@ -86,13 +89,13 @@
       </section>
 
       <section id="best" class="view">
-        <div class="section-head page-head"><div><span class="section-kicker">RANKED DECISIONS</span><h2>Best setups now</h2><p class="muted">Ready setups lead. Forming ideas remain visible, while non-actionable states stay quiet and collapsed.</p></div></div>
+        <div class="section-head page-head"><div><span class="section-kicker">RANKED DECISIONS</span><h2 id="best-heading">Best setups now</h2><p class="muted">Qualified setups lead. Forming ideas remain visible, while non-actionable states stay quiet and collapsed.</p></div></div>
         <div id="best-list" class="scanner-buckets"></div>
       </section>
 
       <section id="market" class="view">
         <div class="section-head page-head radar-page-head">
-          <div><span class="section-kicker">LOCAL MONITORING</span><h2>Live setup radar</h2><p class="muted">Runs in this browser while the page is open. Alerts are decision transitions, not execution instructions.</p></div>
+          <div><span class="section-kicker">LOCAL MONITORING</span><h2 id="radar-heading">Live setup radar</h2><p id="radar-description" class="muted">Runs in this browser while the page is open. Alerts are decision transitions, not execution instructions.</p></div>
           <div class="radar-actions"><button id="notification-toggle" class="secondary">Enable browser alerts</button><button id="market-scan" class="primary">Scan now</button></div>
         </div>
 

@@ -4,6 +4,8 @@ from pathlib import Path
 
 from app.models import Bar, StandardDecision, SymbolAnalysis
 from app.parameters import EngineParameters
+from app.signal_identity import signal_fingerprint
+from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
 
 
 class SignalLogger:
@@ -35,6 +37,11 @@ class SignalLogger:
                     UNIQUE(signal_id, timestamp), FOREIGN KEY(signal_id) REFERENCES signals(id)
                 );
             """)
+            columns = {row[1] for row in db.execute("PRAGMA table_info(signals)")}
+            for name in ("signal_fingerprint", "engine_version", "setup_rules_version", "parameter_version"):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE signals ADD COLUMN {name} TEXT")
+            db.execute("CREATE INDEX IF NOT EXISTS idx_signals_fingerprint ON signals(signal_fingerprint)")
 
     def observe(self, analysis: SymbolAnalysis, bars: list[Bar], parameters: EngineParameters) -> None:
         decision = analysis.decision
@@ -43,17 +50,26 @@ class SignalLogger:
         f5 = analysis.instrument.timeframes["5m"]
         levels = [{"price": x.price, "types": x.types, "importance": x.importance.value,
                    "confluence": x.confluence} for x in analysis.levels]
+        fingerprint = signal_fingerprint(symbol=decision.symbol,
+            setup_family=decision.setup_family.value, direction=decision.direction,
+            trigger=decision.trigger, session=decision.timestamp,
+            engine_version=decision.engine_version,
+            setup_rules_version=decision.setup_rules_version)
         with self._connect() as db:
             db.execute("""INSERT OR IGNORE INTO signals
                 (symbol,timestamp,setup_family,setup_state,quality,direction,price,trigger,invalidation,
-                 target_1,target_2,vwap,structure_5m,structure_15m,relative_volume,atr,levels_json,config_json)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                 target_1,target_2,vwap,structure_5m,structure_15m,relative_volume,atr,levels_json,config_json,
+                 signal_fingerprint,engine_version,setup_rules_version,parameter_version)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (decision.symbol, decision.timestamp.isoformat(), decision.setup_family.value,
                  decision.setup_state.value, decision.quality.value, decision.direction,
                  decision.market_price, decision.trigger, decision.invalidation, decision.target_1,
                  decision.target_2, f5.vwap, decision.structure_5m.value, decision.structure_15m.value,
                  f5.relative_volume, decision.atr, json.dumps(levels, sort_keys=True),
-                 json.dumps(parameters.as_dict(), sort_keys=True)))
+                 json.dumps(parameters.as_dict(), sort_keys=True), fingerprint,
+                 decision.engine_version or ENGINE_VERSION,
+                 decision.setup_rules_version or SETUP_RULES_VERSION,
+                 decision.parameter_version or PARAMETER_VERSION))
             self._update_outcomes(db, decision.symbol, bars)
 
     @staticmethod

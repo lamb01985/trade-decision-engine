@@ -1,0 +1,8 @@
+/* Compact global context and laptop-readable type scale. */
+.global-market-status{display:flex;align-items:center;gap:9px;width:min(1440px,100%);min-height:39px;margin:0 auto;padding:8px 28px;border-bottom:1px solid var(--line);background:rgba(7,18,28,.82)}
+.global-market-status .status-dot{width:8px;height:8px;flex:0 0 auto;border-radius:50%;background:var(--muted);box-shadow:0 0 0 4px rgba(145,163,183,.1)}
+.global-market-status strong{font-size:12px;letter-spacing:.035em}.global-market-status small{font-size:11px;letter-spacing:0}
+.global-market-status.live_current .status-dot{background:var(--green)}.global-market-status.market_closed_last_session .status-dot{background:var(--amber)}.global-market-status.live_stale .status-dot,.global-market-status.data_error .status-dot{background:var(--red)}
+body{font-size:15px;line-height:1.58}.tabs button{font-size:13px}.section-kicker,.eyebrow,label{font-size:10.5px}.page-head p,.candidate p,.rules p,.options-notes,.futures-message{line-height:1.55}
+.candidate{padding:17px 18px}.candidate h3{font-size:14px}.candidate-top .symbol-link.big{font-size:22px}.candidate-next b{line-height:1.45}.card-title{margin-bottom:14px}.data-section{margin-top:19px}.plan-levels>div{padding:14px}.plan-levels b,.current-zone strong,.route-current strong{font-size:19px}.level-name,.level-detail dd,.level-if p,.level-action p{font-size:12px}table{font-size:12px}th{font-size:10px}th,td{padding:12px 13px}.muted,.section-note{line-height:1.5}
+@media(max-width:650px){.global-market-status{align-items:flex-start;flex-wrap:wrap;padding:9px 16px}.global-market-status small{flex-basis:100%;padding-left:17px}}

@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo
 
 from app.market_data.base import MarketDataError
-from app.market_data.massive import MassiveMarketDataProvider
+from app.market_data.base import OptionsDataProvider
 from app.freshness import classify_data
 from app.models import (
     ActionNow,
@@ -91,7 +91,7 @@ def _contract_insight(item: dict) -> OptionContractInsight:
     )
 
 
-async def load_options_intelligence(provider: MassiveMarketDataProvider, symbol: str,
+async def load_options_intelligence(provider: OptionsDataProvider, symbol: str,
                                     expiration: str | None = None, strike_window_pct: float = 10.0,
                                     as_of: date | None = None) -> OptionsIntelligenceResult:
     """Load provider facts for an option chain; no setup, signal, or trade logic is invoked."""
@@ -144,7 +144,7 @@ def _criteria_explanation(contract: OptionContractInsight, price: float, days: i
     ]
 
 
-async def load_contract_shortlist(provider: MassiveMarketDataProvider, symbol: str,
+async def load_contract_shortlist(provider: OptionsDataProvider, symbol: str,
                                   criteria: ContractFitCriteria, as_of: date | None = None) -> OptionsShortlistResult:
     """Filter option-chain facts using visible user criteria; never creates a trade signal."""
     if criteria.contract_type not in {"CALL", "PUT"}:
@@ -414,7 +414,7 @@ def _rejection_summary(assessments: list[ContractQualityAssessment]) -> list[str
     return [f"{count} contract(s): {reason}" for reason, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:5]]
 
 
-async def load_options_plan(provider: MassiveMarketDataProvider, analysis: SymbolAnalysis,
+async def load_options_plan(provider: OptionsDataProvider, analysis: SymbolAnalysis,
                             criteria: OptionsPlanCriteria, as_of: date | None = None) -> OptionsPlanResult:
     """Build a downstream, read-only options plan from an already-produced frozen underlying decision."""
     if criteria.min_days_to_expiry > criteria.max_days_to_expiry:

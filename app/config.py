@@ -7,6 +7,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _origins(value: str | None) -> tuple[str, ...]:
+    origins = tuple(origin.strip().rstrip("/") for origin in (value or "").split(",") if origin.strip())
+    if "*" in origins:
+        raise ValueError("CORS_ALLOWED_ORIGINS must list explicit origins; wildcard is not allowed")
+    return origins
+
+
 @dataclass(frozen=True)
 class Settings:
     massive_api_key: str | None = os.getenv("MASSIVE_API_KEY") or None
@@ -28,6 +35,7 @@ class Settings:
     pushover_priority_too_late: int = int(os.getenv("PUSHOVER_PRIORITY_TOO_LATE", "0"))
     public_app_base_url: str | None = os.getenv("PUBLIC_APP_BASE_URL") or None
     notification_state_path: Path = Path(os.getenv("NOTIFICATION_STATE_PATH", "data/notifications.sqlite3"))
+    cors_allowed_origins: tuple[str, ...] = _origins(os.getenv("CORS_ALLOWED_ORIGINS"))
 
 
 settings = Settings()

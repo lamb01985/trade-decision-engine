@@ -26,6 +26,15 @@ class DataStatus(str, Enum):
     ERROR = "ERROR"
 
 
+class MarketDataState(str, Enum):
+    """Product-level state; deliberately separate from provider/session detail."""
+
+    LIVE_CURRENT = "LIVE_CURRENT"
+    LIVE_STALE = "LIVE_STALE"
+    MARKET_CLOSED_LAST_SESSION = "MARKET_CLOSED_LAST_SESSION"
+    DATA_ERROR = "DATA_ERROR"
+
+
 def _observed(day: date) -> date:
     if day.weekday() == 5:
         return day - timedelta(days=1)
@@ -135,3 +144,15 @@ def is_actionable_data(status: str | DataStatus, session: str | MarketSession) -
     return str(getattr(status, "value", status)) == DataStatus.LIVE.value and str(
         getattr(session, "value", session)
     ) == MarketSession.REGULAR.value
+
+
+def market_data_state(status: str | DataStatus, session: str | MarketSession) -> MarketDataState:
+    status_value = str(getattr(status, "value", status))
+    session_value = str(getattr(session, "value", session))
+    if status_value == DataStatus.MARKET_CLOSED.value and session_value == MarketSession.CLOSED.value:
+        return MarketDataState.MARKET_CLOSED_LAST_SESSION
+    if status_value == DataStatus.LIVE.value:
+        return MarketDataState.LIVE_CURRENT
+    if status_value in {DataStatus.DELAYED.value, DataStatus.STALE.value}:
+        return MarketDataState.LIVE_STALE
+    return MarketDataState.DATA_ERROR

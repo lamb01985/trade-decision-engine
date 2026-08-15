@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 import httpx
 
 from app.models import MarketAlert, MarketAlertType
+from app.signal_identity import signal_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -139,10 +140,10 @@ class NotificationService:
 
     @staticmethod
     def _fingerprint(alert: MarketAlert) -> str:
-        return json.dumps([
-            alert.setup, alert.direction, round(alert.trigger, 4), round(alert.invalidation, 4),
-            round(alert.target_1, 4), round(alert.target_2, 4), round(alert.risk_reward, 2),
-        ], separators=(",", ":"))
+        identity = signal_fingerprint(symbol=alert.symbol, setup_family=alert.setup,
+            direction=alert.direction, trigger=alert.trigger, session=alert.timestamp)
+        return json.dumps([identity, round(alert.invalidation, 4), round(alert.target_1, 4),
+            round(alert.target_2, 4), round(alert.risk_reward, 2)], separators=(",", ":"))
 
     def _deep_link(self, symbol: str) -> str | None:
         if not self.public_app_base_url:

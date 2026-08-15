@@ -20,6 +20,7 @@ class MassiveMarketDataProvider(MarketDataProvider):
         request_params = {**params, "apiKey": self._api_key}
         try:
             response = await self._client.get(path, params=request_params)
+            logger.debug("Massive response path=%s status_code=%s", path, response.status_code)
             response.raise_for_status()
             payload = response.json()
         except (httpx.HTTPError, ValueError) as exc:

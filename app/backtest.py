@@ -17,6 +17,7 @@ from app.market_data.base import MarketDataProvider
 from app.market_data.massive import MassiveMarketDataProvider
 from app.models import ActionNow, Bar, DecisionQuality, SetupProgress
 from app.parameters import DEFAULT_PARAMETERS, EngineParameters
+from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
 
 
 class SplitName(str, Enum):
@@ -245,7 +246,8 @@ def report(events:list[SetupEvent],trades:list[TradeResult],bars_processed:int)-
         breakdowns[dimension]={key:metrics(value) for key,value in sorted(groups.items())}
     setup_metrics=breakdowns["setup_family"]
     ranked=[(key,value) for key,value in setup_metrics.items() if value["expectancy_r"] is not None]
-    return {"bars_processed":bars_processed,"setups_detected":len(events),"trades_generated":len(trades),
+    return {"engine_version":ENGINE_VERSION,"setup_rules_version":SETUP_RULES_VERSION,
+        "parameter_version":PARAMETER_VERSION,"bars_processed":bars_processed,"setups_detected":len(events),"trades_generated":len(trades),
         "overall":metrics(trades),"breakdowns":breakdowns,
         "best_setup":max(ranked,key=lambda x:x[1]["expectancy_r"])[0] if ranked else None,
         "worst_setup":min(ranked,key=lambda x:x[1]["expectancy_r"])[0] if ranked else None,

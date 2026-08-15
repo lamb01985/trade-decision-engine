@@ -17,13 +17,12 @@ from pathlib import Path
 from statistics import mean, median
 from typing import Iterable, Literal
 
-from app.engines.decision import build_symbol_trade_plan, evaluate_symbol_setup, score_setup
-from app.engines.levels import build_levels
-from app.engines.market import ET, analyze_symbol, regular_session_bars
-from app.engines.setups import build_standard_decision
+from app.engines.market import ET, regular_session_bars
+from app.engines.pipeline import evaluate_production
 from app.market_data.base import MarketDataProvider
 from app.models import Bar, SetupProgress, StandardDecision, Trend
 from app.parameters import DEFAULT_PARAMETERS, EngineParameters
+from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
 
 
 class BacktestError(ValueError):
@@ -231,22 +230,14 @@ class HistoricalBarCache:
 def _production_decision(symbol: str, visible: list[Bar], previous: StandardDecision | None,
                          parameters: EngineParameters) -> tuple[StandardDecision | None, list[Bar], float | None]:
     """Run the live scanner's production setup and StandardDecision path on visible bars only."""
-    instrument = analyze_symbol(symbol, visible)
-    if not instrument.available or instrument.as_of is None or instrument.atr_5m is None:
+    try:
+        evaluation = evaluate_production(symbol, visible, previous, parameters)
+    except ValueError:
         return None, [], None
-    current_day = instrument.as_of.astimezone(ET).date()
-    current = [
-        bar for bar in regular_session_bars(visible)
-        if bar.timestamp.astimezone(ET).date() == current_day
-    ]
-    if not current:
+    if evaluation.instrument.atr_5m is None or not evaluation.current_bars:
         return None, [], None
-    levels = build_levels(instrument, current, parameters)
-    legacy_setup = evaluate_symbol_setup(instrument, levels)
-    legacy_plan = build_symbol_trade_plan(instrument, legacy_setup, levels)
-    score = score_setup(instrument, legacy_setup, levels, legacy_plan).score
-    return (build_standard_decision(instrument, levels, current, score, previous, parameters), current,
-            instrument.timeframes["5m"].relative_volume)
+    return (evaluation.decision, evaluation.current_bars,
+            evaluation.instrument.timeframes["5m"].relative_volume)
 
 
 def _is_checkpoint(bar: Bar) -> bool:
@@ -571,6 +562,9 @@ def build_report(result: BacktestResult) -> dict:
     """Return JSON-serializable baseline statistics without changing strategy rules."""
     generated = result.generated_trades
     return {
+        "engine_version": ENGINE_VERSION,
+        "setup_rules_version": SETUP_RULES_VERSION,
+        "parameter_version": PARAMETER_VERSION,
         "configuration": {
             "symbols": list(result.config.symbols),
             "development": asdict(result.config.periods.development),

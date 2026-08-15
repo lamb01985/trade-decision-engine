@@ -16,7 +16,7 @@ from app.engines.alerts import AlertEngine, ScannerPolicy, candidate_from_analys
 from app.config import settings
 from app.market_data.base import MarketDataProvider
 from app.market_data.base import MarketDataError, StockObservation
-from app.freshness import DataStatus, classify_data, is_actionable_data
+from app.freshness import DataStatus, classify_data, is_actionable_data, market_data_state
 from app.models import ActionNow, DashboardAnalysis, MarketScanResult, ScannerRow, SetupState, SymbolAnalysis, Trend
 from app.universe import UniverseSelection
 from app.parameters import DEFAULT_PARAMETERS
@@ -56,6 +56,7 @@ class AnalysisService:
         cache_age = max(0, int(monotonic() - cached_at)) if cached_at is not None else 0
         return result.model_copy(update={
             "data_status": status.value,
+            "data_state": market_data_state(status, session).value,
             "market_session": session.value,
             "data_age_seconds": age,
             "cache_hit": cached_at is not None,
@@ -71,7 +72,9 @@ class AnalysisService:
         symbol = self.normalize_symbol(symbol)
         cached = self._cache.get(symbol)
         if cached and not force and monotonic() - cached[0] < self.cache_seconds:
+            logger.info("analysis_cache symbol=%s result=hit", symbol)
             return self._with_current_freshness(cached[1], cached[0])
+        logger.info("analysis_cache symbol=%s result=miss forced=%s", symbol, force)
         lock = self._locks.setdefault(symbol, asyncio.Lock())
         async with lock:
             cached = self._cache.get(symbol)
@@ -126,6 +129,7 @@ class AnalysisService:
                 analysis_timestamp=analysis_timestamp,
                 decision_bar_timestamp=current_bars[-1].timestamp if current_bars else None,
                 data_age_seconds=age, data_status=data_status.value, market_session=session.value,
+                data_state=market_data_state(data_status, session).value,
                 current_price=observation.price, price_source=observation.source)
             self.signal_logger.observe(result, current_bars, DEFAULT_PARAMETERS)
             self._cache[symbol] = (monotonic(), result)
@@ -162,6 +166,7 @@ class AnalysisService:
                 standardized_decision=result.decision,
                 provider_timestamp=result.provider_timestamp, analysis_timestamp=result.analysis_timestamp,
                 data_age_seconds=result.data_age_seconds, data_status=result.data_status,
+                data_state=result.data_state,
                 market_session=result.market_session))
         quality_rank = {"A": 3, "B": 2, "C": 1, "NO_TRADE": 0, None: 0}
         return sorted(rows, key=lambda row: (quality_rank[row.quality.value if row.quality else None],
@@ -172,6 +177,7 @@ class AnalysisService:
         scan_started = monotonic()
         symbols = [self.normalize_symbol(x) for x in selection.symbols()]
         symbols = list(dict.fromkeys(symbols))[:settings.scanner_max_symbols]
+        logger.info("scanner_start symbols_attempted=%d forced=%s", len(symbols), force)
         analyses: list[SymbolAnalysis] = []
         failed_symbols: list[str] = []
         # Small sequential batches avoid an API burst while still keeping market-wide scans practical.
@@ -212,11 +218,16 @@ class AnalysisService:
         else:
             candidates, alerts, filtered = [], [], 0
         analysis_timestamp = datetime.now(timezone.utc)
+        duration = round(monotonic() - scan_started, 3)
+        logger.info("scanner_end symbols_attempted=%d successful=%d skipped=%d candidates=%d status=%s age_seconds=%s duration_seconds=%.3f",
+                    len(symbols), len(analyses), len(failed_symbols), len(candidates),
+                    data_status.value, age, duration)
         return MarketScanResult(universe_size=len(symbols), analyzed=len(analyses), filtered_illiquid=filtered,
             candidates=candidates, alerts=alerts, data_as_of=provider_timestamp,
             provider_timestamp=provider_timestamp, analysis_timestamp=analysis_timestamp,
             data_age_seconds=age, data_status=data_status.value, market_session=session.value,
-            scan_duration_seconds=round(monotonic() - scan_started, 3), failed_symbols=failed_symbols,
+            data_state=market_data_state(data_status, session).value,
+            scan_duration_seconds=duration, failed_symbols=failed_symbols,
             message=None if candidates else ("MARKET CLOSED — historical analysis only." if data_status == DataStatus.MARKET_CLOSED else "NO HIGH-QUALITY SETUPS RIGHT NOW."),
             next_refresh_seconds=settings.scanner_refresh_seconds)
 

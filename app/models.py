@@ -2,6 +2,7 @@ from datetime import datetime
 from enum import Enum
 
 from pydantic import BaseModel, Field
+from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
 
 
 class Trend(str, Enum):
@@ -241,6 +242,7 @@ class SymbolAnalysis(BaseModel):
     decision_bar_timestamp: datetime | None = None
     data_age_seconds: int | None = None
     data_status: str = "UNKNOWN"
+    data_state: str = "DATA_ERROR"
     market_session: str = "UNKNOWN"
     current_price: float | None = None
     price_source: str = "UNAVAILABLE"
@@ -249,6 +251,9 @@ class SymbolAnalysis(BaseModel):
 
 
 class StandardDecision(BaseModel):
+    engine_version: str = ENGINE_VERSION
+    setup_rules_version: str = SETUP_RULES_VERSION
+    parameter_version: str = PARAMETER_VERSION
     symbol: str
     timestamp: datetime
     market_price: float
@@ -304,6 +309,7 @@ class ScannerRow(BaseModel):
     analysis_timestamp: datetime | None = None
     data_age_seconds: int | None = None
     data_status: str = "UNKNOWN"
+    data_state: str = "DATA_ERROR"
     market_session: str = "UNKNOWN"
 
 
@@ -374,6 +380,7 @@ class MarketScanResult(BaseModel):
     analysis_timestamp: datetime | None = None
     data_age_seconds: int | None = None
     data_status: str = "UNKNOWN"
+    data_state: str = "DATA_ERROR"
     market_session: str = "CLOSED"
     scan_duration_seconds: float = 0
     failed_symbols: list[str] = Field(default_factory=list)

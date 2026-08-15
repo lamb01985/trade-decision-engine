@@ -5,7 +5,8 @@ import pytest
 import httpx
 
 from app.engines.alerts import ScannerPolicy, candidate_from_analysis
-from app.freshness import DataStatus, MarketSession, classify_data, data_age_seconds, market_session
+from app.freshness import (DataStatus, MarketDataState, MarketSession, classify_data,
+                           data_age_seconds, market_data_state, market_session)
 from app.market_data.massive import MassiveMarketDataProvider
 from app.market_data.base import MarketDataError
 from app.models import ActionNow, DecisionQuality, SetupProgress, SetupState
@@ -45,6 +46,18 @@ def test_snapshot_adapter_selects_freshest_priced_observation(monkeypatch):
         assert observation.provider_timestamp == datetime(2026, 8, 17, 15, 0, 2, tzinfo=timezone.utc)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(("status", "session", "expected"), [
+    (DataStatus.LIVE, MarketSession.REGULAR, MarketDataState.LIVE_CURRENT),
+    (DataStatus.DELAYED, MarketSession.REGULAR, MarketDataState.LIVE_STALE),
+    (DataStatus.STALE, MarketSession.REGULAR, MarketDataState.LIVE_STALE),
+    (DataStatus.MARKET_CLOSED, MarketSession.CLOSED, MarketDataState.MARKET_CLOSED_LAST_SESSION),
+    (DataStatus.ERROR, MarketSession.REGULAR, MarketDataState.DATA_ERROR),
+    (DataStatus.UNAVAILABLE, MarketSession.CLOSED, MarketDataState.DATA_ERROR),
+])
+def test_product_market_data_states_are_explicit(status, session, expected):
+    assert market_data_state(status, session) == expected
 
 
 def test_provider_failure_logs_never_expose_query_string_api_key(caplog):

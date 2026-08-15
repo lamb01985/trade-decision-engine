@@ -1,13 +1,13 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app.market_data.massive import MassiveMarketDataProvider
+from app.market_data.base import FuturesDataProvider
 from app.models import FuturesProbeResult
 
 ET = ZoneInfo("America/New_York")
 
 
-async def load_nq_probe(provider: MassiveMarketDataProvider, now: datetime | None = None) -> FuturesProbeResult:
+async def load_nq_probe(provider: FuturesDataProvider, now: datetime | None = None) -> FuturesProbeResult:
     """Load NQ contract metadata and raw minute bars without invoking strategy code."""
     reference = (now or datetime.now(ET)).astimezone(ET)
     contract = await provider.resolve_active_futures_contract("NQ", reference.date())
