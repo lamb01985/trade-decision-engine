@@ -1,0 +1,51 @@
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+
+# Coverage and build output
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Editor and operating-system files
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*~
+*.orig
+*.bak
+
+# Logs and local runtime state
+*.log
+*.sqlite
+*.sqlite3
+*.sqlite3-*
+*.db
+
+# Provider caches and generated research/backtest output
+data/historical_cache/
+data/provider_cache/
+data/backtest_reports/
+data/backtest_*.json
+data/backtest_*.md
+
+# Local delivery artifacts and archived working copies
+*.patch
+*.diff
+*.zip
+How Can I Enhance My Trading Engine Tool_/

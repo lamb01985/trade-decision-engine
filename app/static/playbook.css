@@ -1,0 +1,155 @@
+.level details { color: var(--text); margin-top: 5px; font-size: 10px; }
+.level summary { cursor: pointer; color: var(--amber); }
+.level details p { margin: 5px 0; }
+.playbook-section { margin-top: 12px; }
+.playbook-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+.playbook-card { border-top: 3px solid var(--line); }
+.playbook-title { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.playbook-title strong { font-size: 22px; margin: 0; }
+.playbook-title span { display: block; }
+.playbook-card p { margin: 10px 0; font-size: 11px; }
+.playbook-card p label { display: block; margin-bottom: 2px; }
+.confirmed-plan { display: flex; justify-content: space-between; background: #10271f; border: 1px solid var(--green); padding: 8px; margin: 12px 0; }
+.confirmed-plan b { color: var(--green); }
+@media (max-width: 900px) { .playbook-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 520px) { .playbook-grid { grid-template-columns: 1fr; } }
+.universe-controls { display: flex; flex-wrap: wrap; gap: 15px; align-items: center; padding: 14px; margin-bottom: 20px; background: var(--panel); border: 1px solid var(--line); }
+.universe-controls label { color: var(--text); }
+.universe-controls input[type="checkbox"] { accent-color: var(--blue); }
+.alert-list { display: grid; gap: 7px; margin-bottom: 20px; }
+.market-alert { display: grid; grid-template-columns: 180px 1fr; gap: 8px; border-left: 4px solid var(--amber); }
+.market-alert.triggered { border-color: var(--green); }
+.market-alert.invalidated { border-color: var(--red); }
+.market-alert.too_late { border-color: var(--red); }
+.market-alert small { grid-column: 1 / -1; }
+.push-settings { margin: 0 0 13px; border: 1px solid var(--line); border-radius: 10px; background: rgba(10,24,35,.68); }
+.push-settings summary { display: flex; align-items: center; gap: 9px; padding: 10px 13px; cursor: pointer; }
+.push-settings summary span { font-size: 10px; font-weight: 800; letter-spacing: .1em; }
+.push-settings summary strong { padding: 3px 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 9px; }
+.push-settings summary strong.enabled { border-color: rgba(76,224,170,.35); color: var(--green); }
+.push-settings summary small { margin-left: auto; }
+.push-settings-body { display: flex; align-items: center; gap: 14px; padding: 10px 13px; border-top: 1px solid var(--line); }
+.push-toggles { display: flex; flex-wrap: wrap; gap: 14px; }
+.push-toggles label { color: var(--subtle); font-size: 10px; }
+.push-toggles input { accent-color: var(--blue); }
+.push-settings-body button { margin-left: auto; white-space: nowrap; }
+@media (max-width: 650px) {
+  .push-settings-body { align-items: stretch; flex-direction: column; }
+  .push-settings-body button { margin-left: 0; }
+  .push-toggles { display: grid; grid-template-columns: 1fr 1fr; }
+}
+
+/* Shared terminal typography scale: legible without sacrificing density. */
+:root {
+  --type-meta: 10.5px;
+  --type-small: 11.5px;
+  --type-support: 12.5px;
+  --type-body: 14px;
+  --type-title: 17px;
+  --type-value: 22px;
+}
+body { font-size: var(--type-body); line-height: 1.58; }
+.tabs button { padding: 9px 13px; font-size: 13px; }
+button, input, select { font-size: 13px; }
+h2, .card-title h2 { font-size: var(--type-title); }
+.page-head h2 { font-size: 19px; }
+.page-head p, .muted { line-height: 1.55; }
+.section-kicker, label, small { font-size: var(--type-meta); letter-spacing: .1em; }
+.section-note, .asof { font-size: var(--type-small); line-height: 1.45; }
+.card-note { font-size: var(--type-meta); }
+
+/* Overview: preserve hierarchy while making plan values instant to scan. */
+.decision-hero-copy p { font-size: 15.5px; line-height: 1.55; }
+.decision-hero-copy p b { font-size: var(--type-meta); }
+.decision-meta > span:not(.asof),
+.hero-price > span,
+.plan-levels span,
+.quality-summary span { font-size: var(--type-meta); }
+.decision-meta > strong { font-size: 15px; }
+.decision-meta small { font-size: var(--type-small); letter-spacing: .02em; }
+.hero-price b { font-size: 29px; }
+.hero-price small, .hero-price em { font-size: var(--type-small); line-height: 1.45; }
+.plan-card, .trade-check-card { padding: 24px 26px; }
+.plan-identity strong { font-size: 22px; }
+.plan-identity small { font-size: var(--type-small); }
+.plan-levels > div { padding: 17px 14px; }
+.plan-levels b { font-size: var(--type-value); }
+.plan-levels .current-price-metric small { font-size: 9.5px; line-height: 1.35; }
+.plan-price-context { font-size: var(--type-small); line-height: 1.5; }
+.next-action strong { font-size: 14px; line-height: 1.45; }
+.check-list li { font-size: var(--type-support); line-height: 1.45; }
+.check-result strong { font-size: 15px; }
+.why-panel li, .ladder p, .advanced-evidence li { font-size: var(--type-support); line-height: 1.55; }
+.metrics article strong { font-size: 23px; }
+.metrics article span, .timeframe-grid article span { font-size: var(--type-small); line-height: 1.45; }
+.timeframe-grid article strong { font-size: 24px; }
+
+/* Setup cards and scanner surfaces. */
+.candidate { padding: 18px 19px; }
+.candidate-top .symbol-link.big { font-size: 25px; }
+.quality-grade { width: 31px; height: 31px; font-size: 14px; }
+.candidate-setup h3 { font-size: 14px; line-height: 1.4; }
+.candidate-setup strong { font-size: 12.5px; }
+.candidate-state { font-size: var(--type-meta); }
+.trigger-distance { font-size: var(--type-support) !important; }
+.candidate-next { padding: 10px 11px; }
+.candidate-next span { font-size: var(--type-meta); }
+.candidate-next b { font-size: var(--type-small); line-height: 1.45; }
+.candidate details summary, .candidate-metrics span, .candidate .open-analysis { font-size: var(--type-meta); }
+.bucket-head span, .bucket-head strong { font-size: var(--type-meta); }
+.bucket-head small { font-size: var(--type-small); }
+.radar-status strong { font-size: 15px; }
+.radar-status small { font-size: var(--type-small); letter-spacing: .01em; }
+.radar-setting label, .radar-guardrail span { font-size: var(--type-meta); }
+.radar-guardrail strong { font-size: var(--type-small); }
+.market-alert .alert-title b { font-size: 15px; }
+.market-alert .alert-title span, .market-alert p { font-size: var(--type-small); line-height: 1.45; }
+.alert-badge { font-size: var(--type-meta); }
+table { font-size: var(--type-small); }
+th { font-size: var(--type-meta); }
+th, td { padding: 12px 13px; }
+
+/* Levels: emphasize price, then role, then provenance. */
+.active-map-row { min-height: 43px; padding-block: 9px; }
+.active-map-row strong { font-size: 14px; }
+.active-map-row.current strong { font-size: 17px; }
+.active-map-row b { font-size: var(--type-meta); }
+.key-level { padding: 17px; }
+.key-level > div span, .key-level p b { font-size: var(--type-meta); }
+.key-level > div strong { font-size: 24px; }
+.key-level p { font-size: var(--type-small); line-height: 1.55; }
+.full-level-row { min-height: 76px; padding-block: 11px; }
+.full-level-row > strong { font-size: 19px; }
+.full-level-row.current > strong { font-size: 23px; }
+.ladder-copy b { font-size: 12.5px; }
+.ladder-copy small { font-size: var(--type-meta); }
+.ladder-copy em { font-size: var(--type-meta); }
+.level-detail { padding: 24px; }
+.level-detail h2 { font-size: 21px; }
+.level-detail > p, .level-detail dd { font-size: var(--type-support); line-height: 1.55; }
+.level-detail dt { font-size: var(--type-meta); }
+
+/* Options, futures, settings, and supporting technical evidence. */
+.options-boundary p, .futures-boundary p, .futures-message { font-size: var(--type-support); line-height: 1.5; }
+.options-status, .futures-status, .options-plan-status { font-size: var(--type-small); line-height: 1.45; }
+.options-summary span, .futures-grid span, .options-judgments article span { font-size: var(--type-meta); }
+.options-summary strong, .futures-grid strong { font-size: 19px; }
+.options-summary small, .futures-grid small, .options-judgments article small { font-size: var(--type-small); line-height: 1.4; }
+.options-decision strong { font-size: 27px; }
+.options-decision p, .options-underlying-summary > p, .options-judgments > p,
+.options-contract-card p, .options-contract-card li, .options-no-contract p { font-size: var(--type-support); line-height: 1.5; }
+.options-judgments h3 { font-size: 15px; }
+.options-judgments article strong { font-size: 16px; }
+.options-contract-card h3 { font-size: 20px; }
+.options-contract-card h4 { font-size: var(--type-small); }
+.options-contract-facts small { font-size: var(--type-meta); }
+.push-settings summary span, .push-settings summary strong, .push-toggles label { font-size: var(--type-small); }
+.push-settings-body { padding: 12px 14px; }
+
+@media (max-width: 650px) {
+  :root { --type-body: 13.5px; --type-value: 20px; }
+  .tabs button { font-size: 12.5px; }
+  .plan-card, .trade-check-card { padding: 20px; }
+  .candidate { padding: 16px; }
+  .full-level-row > strong { font-size: 16px; }
+}

@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Trade Decision Engine</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <link rel="stylesheet" href="/static/playbook.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand-block">
+        <div class="brand-mark" aria-hidden="true">TD</div>
+        <div>
+          <div class="eyebrow">TRADE DECISION ENGINE <span class="version-tag">V2</span></div>
+          <h1>Decision support, not trade execution.</h1>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="read-only-pill"><span></span> READ-ONLY MODE</div>
+        <form id="symbol-form" class="symbol-search">
+          <label class="sr-only" for="symbol">Ticker symbol</label>
+          <input id="symbol" maxlength="10" placeholder="Ticker" value="QQQ" aria-label="Ticker">
+          <button class="primary" type="submit">Analyze</button>
+        </form>
+      </div>
+    </header>
+
+    <nav class="tabs" aria-label="Primary navigation">
+      <button data-view="dashboard" class="active">Overview</button>
+      <button data-view="watchlist">Watchlist</button>
+      <button data-view="best">Best setups</button>
+      <button data-view="market">Live radar</button>
+      <button data-view="levels">Levels</button>
+      <button data-view="options">Options</button>
+      <button data-view="futures">Futures data</button>
+      <button id="refresh" class="refresh-button">Refresh analysis</button>
+    </nav>
+
+    <div class="safety-rail">
+      <div><span class="rail-label">SAFETY RAIL</span><strong>Thesis is not a trade.</strong> A score, touch, or bias never authorizes an entry on its own.</div>
+      <div class="rail-steps"><span>Structure</span><i></i><span>Confirmation</span><i></i><span>Risk check</span></div>
+    </div>
+
+    <main>
+      <section id="dashboard" class="view active">
+        <div id="opened-context" class="opened-context" hidden></div>
+        <section id="gate" class="decision-hero wait" aria-live="polite">
+          <div class="decision-hero-copy"><span class="section-kicker">WHAT DO I DO?</span><strong>WAIT</strong><p>Load analysis to evaluate current structure.</p></div>
+          <span id="asof" class="asof"></span>
+        </section>
+
+        <section class="decision-workspace data-section">
+          <article class="plan-card primary-plan"><div class="card-title"><div><span class="section-kicker">CORE TRADE PLAN</span><h2>Entry decision</h2></div><span class="card-note">Current analysis</span></div><div id="plan" class="plan"></div></article>
+          <article class="trade-check-card"><div class="card-title"><div><span class="section-kicker">AUTOMATIC REVIEW</span><h2>Trade check</h2></div></div><div id="trade-check"></div></article>
+        </section>
+
+        <section id="why-panel" class="why-panel data-section" hidden><div><span class="section-kicker">WHY NOT NOW?</span><div id="why-now"></div></div><div><span class="section-kicker">WHAT WOULD MAKE THIS INTERESTING?</span><div id="changes"></div></div></section>
+
+        <section class="levels-card data-section"><div class="section-head"><div><span class="section-kicker">KEY LEVELS</span><h2>If → then playbook</h2><p class="muted">Setup-specific levels from the current backend decision. No trade-management rules are added.</p></div><span class="card-note">Price anchored</span></div><div id="levels-summary" class="levels-summary"></div><div class="active-map-head"><div><span class="section-kicker">ACTIVE TRADE MAP</span><h3>Plan around current price</h3></div><button id="view-full-levels" class="text-link">View full levels →</button></div><div id="active-trade-map" class="active-trade-map"></div><div id="level-playbooks" class="key-level-playbook"></div><details class="level-ladder"><summary><span>All levels</span><small>Advanced mapped structure</small></summary><div id="levels-map" class="levels-map"></div></details></section>
+
+        <section class="data-section"><div class="section-head"><div><span class="section-kicker">TIMEFRAME STRUCTURE</span><h2>Trend alignment</h2></div><span class="section-note">Evidence, not an entry instruction</span></div><div id="timeframes" class="grid timeframe-grid"></div></section>
+
+        <details class="advanced-evidence data-section"><summary><div><span class="section-kicker">ADVANCED EVIDENCE</span><h2>Raw metrics and rationale</h2></div><span>Expand</span></summary><div class="advanced-evidence-body"><div id="metrics" class="grid metrics"></div><section class="grid two"><article><div class="card-title compact"><h2>Heuristic quality evidence</h2><span class="card-note">Not win probability</span></div><div id="score"></div></article><article><span class="section-kicker">DECISION RATIONALE</span><h2>Why the engine reached this state</h2><div id="decision"></div><div id="cross" class="cross"></div></article></section></div></details>
+      </section>
+
+      <section id="levels" class="view">
+        <div class="section-head page-head levels-page-head"><div><span class="section-kicker">FULL STRUCTURAL MAP</span><h2><span id="levels-symbol">QQQ</span> decision battlefield</h2><p class="muted">Every displayed price comes from the current analysis. Setup levels are emphasized; structural levels remain context.</p></div><button id="back-to-plan" class="secondary">Back to trade plan →</button></div>
+        <div id="levels-status" class="levels-status loading">Load analysis to map levels.</div>
+        <div id="level-groups" class="level-groups"></div>
+        <section class="full-levels-workspace">
+          <article class="full-ladder-card"><div class="card-title"><div><span class="section-kicker">PRICE LADDER</span><h2>Highest to lowest</h2></div><span class="card-note">Distance from current</span></div><div id="full-level-ladder" class="full-level-ladder"></div></article>
+          <aside id="level-detail" class="level-detail"><span class="section-kicker">LEVEL DETAIL</span><h2>Select a level</h2><p>Choose any price in the ladder to see what it is, why it matters, and what the current setup says about it.</p></aside>
+        </section>
+        <section class="data-section"><div class="section-head"><div><span class="section-kicker">SETUP LEVELS</span><h2>If → then playbook</h2><p class="muted">Consequences are limited to semantics already present in the current backend plan.</p></div></div><div id="full-level-playbook" class="key-level-playbook"></div></section>
+        <section class="data-section confluence-section"><div class="section-head"><div><span class="section-kicker">CONFLUENCE</span><h2>Existing decision zones</h2><p class="muted">Backend-grouped independently derived levels. Confluence is context, not probability.</p></div></div><div id="confluence-zones" class="confluence-zones"></div></section>
+      </section>
+
+      <section id="watchlist" class="view">
+        <div class="section-head page-head"><div><span class="section-kicker">YOUR UNIVERSE</span><h2>Watchlist scanner</h2><p class="muted">Actionable quality is shown first. Use All rows only when you need diagnostic context.</p></div><form id="watch-form" class="inline-form"><input id="watch-symbol" maxlength="10" placeholder="Add ticker"><button class="primary">Add symbol</button></form></div>
+        <div class="watchlist-toolbar"><div class="quality-filter" role="group" aria-label="Watchlist quality filter"><button data-quality-filter="actionable" class="active">Actionable A/B</button><button data-quality-filter="confirmed">Confirmed only</button><button data-quality-filter="all">All rows</button><button id="reset-watchlist-sort" class="recommended-sort">Recommended order</button></div><span id="watchlist-count" class="section-note">Scan your watchlist to rank candidates.</span></div>
+        <div id="chips" class="chips"></div>
+        <div id="watchlist-buckets" class="scanner-buckets"></div>
+        <details class="scanner-details"><summary>Advanced scanner table <span>Raw metrics and sorting</span></summary><div class="table-wrap"><table><thead><tr><th data-sort="symbol">SYMBOL</th><th data-sort="price">PRICE</th><th data-sort="bias">BIAS</th><th data-sort="setup">SETUP</th><th data-sort="quality">QUALITY / SCORE <span id="score-sort-indicator">◆</span></th><th data-sort="vwap_state">VWAP</th><th data-sort="trend_1m">1M</th><th data-sort="trend_5m">5M</th><th data-sort="trend_15m">15M</th><th data-sort="relative_volume">RVOL</th><th data-sort="nearest_support">SUPPORT</th><th data-sort="nearest_resistance">RESISTANCE</th><th data-sort="trigger">TRIGGER</th><th data-sort="action_now">STATUS</th></tr></thead><tbody id="scanner-body"></tbody></table></div></details>
+      </section>
+
+      <section id="best" class="view">
+        <div class="section-head page-head"><div><span class="section-kicker">RANKED DECISIONS</span><h2>Best setups now</h2><p class="muted">Ready setups lead. Forming ideas remain visible, while non-actionable states stay quiet and collapsed.</p></div></div>
+        <div id="best-list" class="scanner-buckets"></div>
+      </section>
+
+      <section id="market" class="view">
+        <div class="section-head page-head radar-page-head">
+          <div><span class="section-kicker">LOCAL MONITORING</span><h2>Live setup radar</h2><p class="muted">Runs in this browser while the page is open. Alerts are decision transitions, not execution instructions.</p></div>
+          <div class="radar-actions"><button id="notification-toggle" class="secondary">Enable browser alerts</button><button id="market-scan" class="primary">Scan now</button></div>
+        </div>
+
+        <section class="radar-console">
+          <div id="radar-status" class="radar-status idle"><span class="live-dot"></span><div><span class="section-kicker">RADAR STATUS</span><strong>Waiting for first scan</strong><small>Open this view to start local monitoring.</small></div></div>
+          <div class="radar-setting"><label for="radar-interval">SCAN EVERY</label><select id="radar-interval" aria-label="Local scan interval"><option value="60">60 seconds</option><option value="120">2 minutes</option><option value="300">5 minutes</option></select></div>
+          <div class="radar-guardrail"><span>ALERT FILTER</span><strong>Radar · Confirmed · Invalidated</strong></div>
+        </section>
+
+        <details class="push-settings">
+          <summary><span>PUSHOVER</span><strong id="push-status">Checking…</strong><small>Phone notification settings</small></summary>
+          <div class="push-settings-body">
+            <div class="push-toggles" role="group" aria-label="Pushover alert transitions">
+              <label><input id="push-radar" type="checkbox"> A setup forming</label>
+              <label><input id="push-ready" type="checkbox"> Ready / Confirmed</label>
+              <label><input id="push-invalidated" type="checkbox"> Invalidated</label>
+              <label><input id="push-too-late" type="checkbox"> Too Late</label>
+            </div>
+            <button id="push-test" class="secondary" type="button">Send test notification</button>
+            <span id="push-feedback" class="section-note"></span>
+          </div>
+        </details>
+
+        <div class="universe-controls"><label><input id="use-nasdaq" type="checkbox"> NASDAQ-100</label><label><input id="use-sp" type="checkbox"> S&amp;P 500 LIQUID UNIVERSE</label><input id="additional" placeholder="Additional symbols: OXY, XLE"></div>
+
+        <div class="split-section-head"><div><span class="section-kicker">NEW TRANSITIONS</span><h2>Alert feed</h2></div><span id="market-meta" class="asof"></span></div>
+        <div id="market-alerts" class="alert-list"></div>
+        <div class="split-section-head"><div><span class="section-kicker">CURRENT DECISIONS</span><h2>Ready, watch, or ignore</h2></div><span class="section-note">Every click revalidates current analysis</span></div>
+        <div id="market-candidates" class="scanner-buckets"></div>
+      </section>
+
+      <section id="options" class="view">
+        <div class="section-head page-head options-page-head">
+          <div><span class="section-kicker">OPTIONS PLAN</span><h2>Underlying decision first</h2><p class="muted">A read-only contract review downstream of the existing setup engine. An option can never rescue an ineligible underlying setup.</p></div>
+          <form id="options-plan-form" class="options-controls">
+            <input id="options-symbol" maxlength="10" value="QQQ" placeholder="Underlying" aria-label="Options underlying symbol">
+            <select id="options-window" aria-label="Strike window"><option value="5">±5% strikes</option><option value="10" selected>±10% strikes</option><option value="20">±20% strikes</option></select>
+            <button class="primary" type="submit">Build options plan</button>
+          </form>
+        </div>
+        <section class="options-boundary"><span class="section-kicker">SAFETY BOUNDARY</span><strong>Decision support only.</strong><p>The frozen underlying decision has veto power. Missing provider fields stay missing, and no order or automated execution is available.</p></section>
+        <section class="options-plan" aria-live="polite">
+          <div id="options-plan-status" class="options-plan-status">Enter an underlying and build an options plan.</div>
+          <div id="options-plan-results" class="options-plan-results"></div>
+        </section>
+        <details class="options-plan-settings">
+          <summary>Plan criteria <span>Visible contract-fit thresholds</span></summary>
+          <form id="options-plan-settings-form" class="shortlist-controls">
+            <label>TIME HORIZON<select id="plan-horizon"><option value="3,10" selected>3–10 days</option><option value="7,21">7–21 days</option><option value="14,45">14–45 days</option></select></label>
+            <label>ABSOLUTE DELTA<select id="plan-delta"><option value="0.35,0.65" selected>0.35–0.65</option><option value="0.45,0.60">0.45–0.60</option><option value="0.25,0.45">0.25–0.45</option></select></label>
+            <label>MINIMUM OI<input id="plan-oi" type="number" min="0" value="100"></label>
+            <label>MAX SPREAD %<input id="plan-spread" type="number" min="0.1" max="100" step="0.1" value="10"></label>
+            <button class="primary" type="submit">Rebuild plan</button>
+          </form>
+          <p class="options-methodology">Contract Quality requires matching call/put direction, observable bid/ask spread, delta, open interest, and acceptable time. These settings do not change the underlying setup.</p>
+        </details>
+        <details class="options-plan-settings">
+          <summary>Advanced details / raw option-chain evidence <span>Greeks and full chain are secondary</span></summary>
+          <form id="options-form" class="options-controls">
+            <select id="options-expiration" aria-label="Options expiration" disabled><option>Load expirations</option></select>
+            <button class="primary" type="submit">Load raw chain</button>
+          </form>
+          <div id="options-status" class="options-status">Raw chain has not been requested.</div>
+          <div id="options-summary" class="options-summary"></div>
+          <div class="options-toolbar"><div class="options-type-filter" role="group" aria-label="Option contract type"><button type="button" data-options-type="all" class="active">All contracts</button><button type="button" data-options-type="CALL">Calls</button><button type="button" data-options-type="PUT">Puts</button></div><span id="options-count" class="section-note"></span></div>
+          <div class="table-wrap options-table-wrap"><table><thead><tr><th data-options-sort="contract_type">TYPE</th><th data-options-sort="strike_price">STRIKE</th><th data-options-sort="midpoint">MID</th><th data-options-sort="spread_pct">SPREAD %</th><th data-options-sort="last_trade_price">LAST</th><th data-options-sort="volume">VOLUME</th><th data-options-sort="open_interest">OI</th><th data-options-sort="volume_open_interest_ratio">VOL / OI</th><th data-options-sort="implied_volatility">IV</th><th data-options-sort="delta">DELTA</th><th data-options-sort="gamma">GAMMA</th><th data-options-sort="theta">THETA</th><th data-options-sort="vega">VEGA</th><th data-options-sort="ticker">CONTRACT</th></tr></thead><tbody id="options-chain-body"></tbody></table></div>
+          <p id="options-notes" class="options-notes"></p>
+        </details>
+      </section>
+
+      <section id="futures" class="view">
+        <div class="section-head page-head">
+          <div><span class="section-kicker">FUTURES COMPATIBILITY</span><h2>NQ data probe</h2><p class="muted">Contract discovery and raw CME futures bars only. No setup engine, trade plan, target, alert, or execution logic is used here.</p></div>
+          <button id="futures-probe" class="primary">Load active NQ contract</button>
+        </div>
+        <section class="futures-boundary"><span class="section-kicker">ISOLATION GUARANTEE</span><strong>Data-only mode</strong><p>This view resolves the active NQ contract and displays provider-returned intraday data. It does not create a setup or trade instruction.</p></section>
+        <div id="futures-probe-status" class="futures-status">No futures request has been made.</div>
+        <div id="futures-probe-results" class="futures-grid" aria-live="polite"></div>
+      </section>
+
+      <section class="rules"><span class="section-kicker">SYSTEM BOUNDARY</span><h2>Behavioral guardrails</h2><p>No averaging down · No martingale or loss-recovery sizing · No automated execution · No brokerage integration</p></section>
+      <p id="error" role="alert"></p>
+    </main>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
