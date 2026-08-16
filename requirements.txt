@@ -3,4 +3,6 @@ httpx==0.28.1
 python-dotenv==1.2.2
 uvicorn[standard]==0.52.3
 pytest==8.3.5
-
+SQLAlchemy==2.0.41
+alembic==1.16.4
+psycopg[binary]==3.2.9

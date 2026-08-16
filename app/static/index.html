@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/readability.css">
 </head>
 <body>
+  <a class="skip-link" href="#dashboard">Skip to decision cockpit</a>
   <div class="app-shell">
     <header class="topbar">
       <div class="brand-block">
@@ -28,15 +29,15 @@
       </div>
     </header>
 
-    <nav class="tabs" aria-label="Primary navigation">
-      <button data-view="dashboard" class="active">Overview</button>
-      <button data-view="watchlist">Watchlist</button>
-      <button data-view="best">Best setups</button>
-      <button data-view="market">Live radar</button>
-      <button data-view="levels">Levels</button>
-      <button data-view="options">Options</button>
-      <button data-view="futures">Futures data</button>
-      <button id="refresh" class="refresh-button">Refresh analysis</button>
+    <nav class="tabs" aria-label="Primary navigation" role="tablist">
+      <button type="button" data-view="dashboard" class="active" role="tab" aria-controls="dashboard" aria-selected="true">Overview</button>
+      <button type="button" data-view="watchlist" role="tab" aria-controls="watchlist" aria-selected="false">Watchlist</button>
+      <button type="button" data-view="best" role="tab" aria-controls="best" aria-selected="false">Best setups</button>
+      <button type="button" data-view="market" role="tab" aria-controls="market" aria-selected="false">Live radar</button>
+      <button type="button" data-view="levels" role="tab" aria-controls="levels" aria-selected="false">Levels</button>
+      <button type="button" data-view="options" role="tab" aria-controls="options" aria-selected="false">Options</button>
+      <button type="button" data-view="futures" role="tab" aria-controls="futures" aria-selected="false">Futures data</button>
+      <button type="button" id="refresh" class="refresh-button">Refresh analysis</button>
     </nav>
 
     <div id="global-market-status" class="global-market-status loading" role="status" aria-live="polite"><span class="status-dot"></span><strong>CHECKING MARKET DATA</strong><small>Loading the latest available context…</small></div>
@@ -56,7 +57,7 @@
 
         <section class="decision-workspace data-section">
           <article class="plan-card primary-plan"><div class="card-title"><div><span class="section-kicker">CORE TRADE PLAN</span><h2>Entry decision</h2></div><span class="card-note">Current analysis</span></div><div id="plan" class="plan"></div></article>
-          <article class="trade-check-card"><div class="card-title"><div><span class="section-kicker">AUTOMATIC REVIEW</span><h2>Trade check</h2></div></div><div id="trade-check"></div></article>
+          <article class="trade-check-card"><div class="card-title"><div><span class="section-kicker">BACKEND CONDITIONS</span><h2>What we need to see</h2></div><span class="card-note">No UI inference</span></div><div id="trade-check"></div></article>
         </section>
 
         <section id="why-panel" class="why-panel data-section" hidden><div><span class="section-kicker">WHY NOT NOW?</span><div id="why-now"></div></div><div><span class="section-kicker">WHAT WOULD MAKE THIS INTERESTING?</span><div id="changes"></div></div></section>

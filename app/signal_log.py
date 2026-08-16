@@ -6,11 +6,24 @@ from app.models import Bar, StandardDecision, SymbolAnalysis
 from app.parameters import EngineParameters
 from app.signal_identity import signal_fingerprint
 from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
+from app.persistence.contracts import SignalStore
+
+
+class NoOpSignalStore:
+    """Hosted adapter: analysis remains available while persistence is unavailable."""
+    persistent = False
+
+    def observe(self, analysis: SymbolAnalysis, bars: list[Bar], parameters: EngineParameters) -> None:
+        return None
+
+    def get_latest_decision(self, symbol: str) -> StandardDecision | None:
+        return None
 
 
 class SignalLogger:
     """Local evidence log. It records market setups, never personal trades or P/L."""
     def __init__(self, path: Path) -> None:
+        self.persistent = True
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()

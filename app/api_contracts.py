@@ -189,6 +189,7 @@ class NotificationStatus(BaseModel):
 class HealthResponse(BaseModel):
     app: str = "ok"
     engine_version: str = ENGINE_VERSION
+    capabilities: dict[str, bool] = Field(default_factory=dict)
 
 
 class ReadinessResponse(BaseModel):
@@ -197,6 +198,8 @@ class ReadinessResponse(BaseModel):
     pushover_configured: bool
     signal_store_available: bool
     notification_store_available: bool
+    scanner_ready: bool = True
+    capabilities: dict[str, bool] = Field(default_factory=dict)
 
 
 def _market_status(data_status: str, session: str, provider_timestamp: datetime | None,

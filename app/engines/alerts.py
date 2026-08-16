@@ -1,8 +1,11 @@
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 
 from app.models import (ChaseStatus, MarketAlert, MarketAlertType, MarketSetupCandidate,
                         SetupState, SymbolAnalysis)
+from app.persistence.contracts import ScannerState, ScannerStateStore
 
 
 @dataclass(frozen=True)
@@ -97,9 +100,33 @@ def candidate_from_analysis(result: SymbolAnalysis, policy: ScannerPolicy,
 
 class AlertEngine:
     """Stateful transition detector; deliberately independent of notification delivery."""
-    def __init__(self, policy: ScannerPolicy | None = None) -> None:
+    def __init__(self, policy: ScannerPolicy | None = None,
+                 state_store: ScannerStateStore | None = None,
+                 scanner_scope: str = "live") -> None:
         self.policy = policy or ScannerPolicy()
+        self.state_store = state_store
+        self.scanner_scope = scanner_scope
+        canonical = json.dumps(asdict(self.policy), sort_keys=True, separators=(",", ":"))
+        self.policy_fingerprint = hashlib.sha256(canonical.encode()).hexdigest()[:24]
         self._states: dict[str, tuple[str, tuple, datetime, float, int]] = {}
+
+    def _previous(self, symbol: str) -> tuple[str, tuple, datetime, float, int] | None:
+        previous = self._states.get(symbol)
+        if previous is None and self.state_store is not None:
+            stored = self.state_store.get(self.scanner_scope, self.policy_fingerprint, symbol)
+            if stored is not None:
+                previous = (stored.state, tuple(json.loads(stored.candidate_fingerprint)),
+                            stored.last_alert_at or stored.last_transition_at,
+                            stored.last_price, stored.last_score)
+                self._states[symbol] = previous
+        return previous
+
+    def _persist(self, symbol: str, value: tuple[str, tuple, datetime, float, int]) -> None:
+        if self.state_store is None: return
+        state, fingerprint, last_alert, price, score = value
+        self.state_store.advance(ScannerState(self.scanner_scope, self.policy_fingerprint,
+            symbol, state, json.dumps(fingerprint, separators=(",", ":")), last_alert,
+            last_alert, price, score, last_alert))
 
     @staticmethod
     def _fingerprint(candidate: MarketSetupCandidate) -> tuple:
@@ -115,13 +142,15 @@ class AlertEngine:
             symbol = analysis.instrument.symbol
             seen.add(symbol)
             candidate, rejection = candidate_from_analysis(analysis, self.policy, now)
-            previous = self._states.get(symbol)
+            previous = self._previous(symbol)
             if candidate is None:
                 if rejection == "ILLIQUID": filtered += 1
                 if previous and previous[0] in {"RADAR", "TRIGGERED"}:
                     current_price = analysis.instrument.timeframes["1m"].price
                     alerts.append(self._alert_from_previous(symbol, previous, current_price, rejection, now))
                     self._states.pop(symbol, None)
+                    if self.state_store is not None:
+                        self.state_store.clear(self.scanner_scope, self.policy_fingerprint, symbol)
                 continue
             state = "TRIGGERED" if candidate.status in {SetupState.LONG_CONFIRMED, SetupState.SHORT_CONFIRMED} else "RADAR"
             fingerprint = self._fingerprint(candidate)
@@ -131,6 +160,7 @@ class AlertEngine:
             if changed or (cooldown and meaningful):
                 alerts.append(self._alert(candidate, MarketAlertType(state), now))
                 self._states[symbol] = (state, fingerprint, now, candidate.current_price, candidate.setup_score)
+                self._persist(symbol, self._states[symbol])
             candidates.append(candidate)
         candidates.sort(key=lambda x: (x.status in {SetupState.LONG_CONFIRMED, SetupState.SHORT_CONFIRMED}, x.setup_score, x.risk_reward, -abs(x.distance_to_trigger_pct)), reverse=True)
         return candidates, alerts, filtered

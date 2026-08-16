@@ -13,6 +13,7 @@ import httpx
 
 from app.models import MarketAlert, MarketAlertType
 from app.signal_identity import signal_fingerprint
+from app.persistence.contracts import NotificationStore
 
 logger = logging.getLogger(__name__)
 
@@ -73,21 +74,28 @@ class AlertPreferences:
 class NotificationService:
     """Durable, downstream delivery policy for existing AlertEngine transitions."""
 
-    def __init__(self, provider: NotificationProvider | None, state_path: Path,
+    def __init__(self, provider: NotificationProvider | None, state_path: Path | None,
                  public_app_base_url: str | None = None,
-                 priorities: dict[str, int] | None = None) -> None:
+                 priorities: dict[str, int] | None = None,
+                 store: NotificationStore | None = None) -> None:
         self.provider = provider
         self.state_path = state_path
         self.public_app_base_url = public_app_base_url.rstrip("/") if public_app_base_url else None
         self.priorities = {"RADAR": 0, "READY": 1, "INVALIDATED": 0, "TOO_LATE": 0, **(priorities or {})}
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self._initialize()
+        self.store = store
+        self.persistent = state_path is not None or store is not None
+        self._preferences = AlertPreferences()
+        if state_path is not None:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)  # type: ignore[union-attr]
+            self._initialize()
 
     @property
     def enabled(self) -> bool:
         return self.provider is not None
 
     def _connect(self) -> sqlite3.Connection:
+        if self.state_path is None:
+            raise RuntimeError("Durable notification state is unavailable")
         connection = sqlite3.connect(self.state_path)
         connection.row_factory = sqlite3.Row
         return connection
@@ -110,6 +118,10 @@ class NotificationService:
                 VALUES (1, 1, 1, 1, 1, 0)""")
 
     def preferences(self) -> AlertPreferences:
+        if self.store is not None:
+            return AlertPreferences(**self.store.preferences())
+        if not self.persistent:
+            return self._preferences
         with self._connect() as db:
             row = db.execute("SELECT * FROM notification_settings WHERE id = 1").fetchone()
         return AlertPreferences(**{key: bool(row[key]) for key in asdict(AlertPreferences())})
@@ -117,7 +129,11 @@ class NotificationService:
     def update_preferences(self, values: dict[str, bool]) -> AlertPreferences:
         allowed = set(asdict(AlertPreferences()))
         updates = {key: bool(value) for key, value in values.items() if key in allowed}
-        if updates:
+        if self.store is not None:
+            self.store.update_preferences(updates)
+        elif updates and not self.persistent:
+            self._preferences = AlertPreferences(**(asdict(self._preferences) | updates))
+        elif updates:
             assignments = ", ".join(f"{key} = ?" for key in updates)
             with self._connect() as db:
                 db.execute(f"UPDATE notification_settings SET {assignments} WHERE id = 1",
@@ -132,6 +148,7 @@ class NotificationService:
             "alerts": asdict(self.preferences()),
             "public_url_configured": bool(self.public_app_base_url),
             "priorities": dict(self.priorities),
+            "automatic_alerts_available": self.persistent,
         }
 
     @staticmethod
@@ -199,6 +216,8 @@ class NotificationService:
                 (alert.symbol, alert.setup, alert.direction, fingerprint, event, last_state, last_time, last_ok))
 
     async def process(self, alerts: list[MarketAlert], data_status: str, market_session: str) -> int:
+        if not self.persistent:
+            return 0
         if data_status != "LIVE" or market_session != "REGULAR":
             return 0
         preferences = self.preferences()
@@ -206,29 +225,45 @@ class NotificationService:
         for alert in alerts:
             event = self._event(alert)
             fingerprint = self._fingerprint(alert)
-            prior = self._prior(alert.symbol)
+            prior = None if self.store is not None else self._prior(alert.symbol)
             toggle = {"RADAR": preferences.radar, "READY": preferences.ready,
                       "INVALIDATED": preferences.invalidated, "TOO_LATE": preferences.too_late}[event]
             quality_allowed = alert.quality == "A" or (preferences.allow_b_quality and alert.quality == "B")
-            was_notified = bool(prior and prior["last_notified_state"] in {"RADAR", "READY"})
+            was_notified = (bool(prior and prior["last_notified_state"] in {"RADAR", "READY"})
+                            if self.store is None else self.store.has_prior_active(fingerprint))
             unchanged = bool(prior and prior["last_notified_state"] == event and prior["fingerprint"] == fingerprint)
             eligible = toggle and not unchanged
             if event in {"RADAR", "READY"}:
                 eligible = eligible and quality_allowed
             else:
                 eligible = eligible and was_notified
-            if not eligible or not self.enabled:
-                self._record(alert, event, fingerprint, None, None)
+            event_key = f"{fingerprint}:{event}"
+            if not eligible:
+                if self.store is None:
+                    self._record(alert, event, fingerprint, None, None)
+                continue
+            if not self.enabled:
+                if self.store is not None:
+                    self.store.record_eligible(event_key, event)
+                else:
+                    self._record(alert, event, fingerprint, None, None)
+                continue
+            if self.store is not None and not self.store.reserve(event_key, event):
                 continue
             try:
                 await self.provider.send(self._message(alert, event))  # type: ignore[union-attr]
                 sent += 1
                 delivered = True
+                if self.store is not None:
+                    self.store.mark_sent(event_key)
             except Exception as exc:
                 # Record the attempt so a transient outage cannot create a retry storm.
                 delivered = False
+                if self.store is not None:
+                    self.store.mark_failed(event_key, type(exc).__name__)
                 logger.warning("Pushover delivery failed for %s %s (%s)", alert.symbol, event, type(exc).__name__)
-            self._record(alert, event, fingerprint, event, delivered)
+            if self.store is None:
+                self._record(alert, event, fingerprint, event, delivered)
         return sent
 
     async def send_test(self) -> dict:

@@ -20,7 +20,8 @@ from app.freshness import DataStatus, classify_data, is_actionable_data, market_
 from app.models import ActionNow, DashboardAnalysis, MarketScanResult, ScannerRow, SetupState, SymbolAnalysis, Trend
 from app.universe import UniverseSelection
 from app.parameters import DEFAULT_PARAMETERS
-from app.signal_log import SignalLogger
+from app.signal_log import SignalLogger, SignalStore
+from app.persistence.contracts import ScannerStateStore
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -30,15 +31,18 @@ DEFAULT_WATCHLIST = ["QQQ", "SPY", "IWM", "SMH", "NVDA", "AMD", "AMZN", "META", 
 
 class AnalysisService:
     def __init__(self, provider: MarketDataProvider, cache_seconds: int = 60,
-                 signal_logger: SignalLogger | None = None) -> None:
+                 signal_logger: SignalStore | None = None,
+                 scanner_state_store: ScannerStateStore | None = None) -> None:
         self.provider = provider
         self.cache_seconds = cache_seconds
         self._cache: dict[str, tuple[float, SymbolAnalysis]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._market_scan_lock = asyncio.Lock()
+        self.scanner_state_store = scanner_state_store
         self.alert_engine = AlertEngine(ScannerPolicy(
             minimum_price=settings.scanner_min_price,
             minimum_average_dollar_volume=settings.scanner_min_average_dollar_volume,
-            minimum_score=settings.scanner_min_score))
+            minimum_score=settings.scanner_min_score), state_store=scanner_state_store)
         self._alert_engines: dict[ScannerPolicy, AlertEngine] = {self.alert_engine.policy: self.alert_engine}
         self._decisions = {}
         self.signal_logger = signal_logger or SignalLogger(settings.signal_log_path)
@@ -68,7 +72,8 @@ class AnalysisService:
             ),
         })
 
-    async def analyze_symbol(self, symbol: str, include_cross_market: bool = True, force: bool = False) -> SymbolAnalysis:
+    async def analyze_symbol(self, symbol: str, include_cross_market: bool = True, force: bool = False,
+                             persist_actionable_only: bool = False) -> SymbolAnalysis:
         symbol = self.normalize_symbol(symbol)
         cached = self._cache.get(symbol)
         if cached and not force and monotonic() - cached[0] < self.cache_seconds:
@@ -96,13 +101,16 @@ class AnalysisService:
             bar_observation = StockObservation(symbol, latest_bar.close, latest_bar.timestamp, "MASSIVE_COMPLETED_MINUTE_AGGREGATE")
             observation = observation_result if isinstance(observation_result, StockObservation) else None
             if isinstance(observation_result, Exception):
-                logger.warning("Snapshot observation unavailable for %s; using completed aggregate: %s", symbol, observation_result)
+                logger.warning("snapshot_fallback symbol=%s error_type=%s", symbol,
+                               type(observation_result).__name__)
             if observation is None or observation.provider_timestamp < bar_observation.provider_timestamp:
                 observation = bar_observation
-            evaluation = evaluate_production(symbol, bars, self._decisions.get(symbol))
+            prior = self._decisions.get(symbol)
+            if prior is None and hasattr(self.signal_logger, "get_latest_decision"):
+                prior = self.signal_logger.get_latest_decision(symbol)
+            evaluation = evaluate_production(symbol, bars, prior)
             instrument, current_bars, levels = evaluation.instrument, evaluation.current_bars, evaluation.levels
             setup, plan, score, decision = evaluation.legacy_setup, evaluation.legacy_plan, evaluation.score, evaluation.decision
-            self._decisions[symbol] = decision
             playbooks = build_level_playbooks(levels, current_bars, instrument.timeframes["1m"].price,
                                               instrument.timeframes["5m"].relative_volume, instrument.atr_5m)
             f5, f15 = instrument.timeframes["5m"], instrument.timeframes["15m"]
@@ -131,7 +139,12 @@ class AnalysisService:
                 data_age_seconds=age, data_status=data_status.value, market_session=session.value,
                 data_state=market_data_state(data_status, session).value,
                 current_price=observation.price, price_source=observation.source)
-            self.signal_logger.observe(result, current_bars, DEFAULT_PARAMETERS)
+            # Persistence/lifecycle state advances only from current regular-session data.
+            # Premarket, after-hours, closed, stale, and unavailable observations remain
+            # visible to callers but cannot manufacture a production state transition.
+            if not persist_actionable_only or (data_status == DataStatus.LIVE and session.value == "REGULAR"):
+                self._decisions[symbol] = decision
+                self.signal_logger.observe(result, current_bars, DEFAULT_PARAMETERS)
             self._cache[symbol] = (monotonic(), result)
             return result
 
@@ -141,7 +154,8 @@ class AnalysisService:
         rows = []
         for symbol, result in zip(normalized, results):
             if isinstance(result, Exception):
-                logger.warning("Scanner skipped %s: %s", symbol, result)
+                logger.warning("scanner_symbol_skipped symbol=%s error_type=%s", symbol,
+                               type(result).__name__)
                 continue
             inst, setup, plan = result.instrument, result.setup, result.trade_plan
             price = inst.timeframes["1m"].price
@@ -173,7 +187,15 @@ class AnalysisService:
             row.setup_progress.value == "CONFIRMED" if row.setup_progress else False, row.setup_score), reverse=True)
 
     async def market_scan(self, selection: UniverseSelection, force: bool = False,
-                          policy: ScannerPolicy | None = None) -> MarketScanResult:
+                          policy: ScannerPolicy | None = None,
+                          durable_transitions_only: bool = False) -> MarketScanResult:
+        async with self._market_scan_lock:
+            return await self._market_scan_unlocked(selection, force, policy,
+                                                    durable_transitions_only)
+
+    async def _market_scan_unlocked(self, selection: UniverseSelection, force: bool = False,
+                                    policy: ScannerPolicy | None = None,
+                                    durable_transitions_only: bool = False) -> MarketScanResult:
         scan_started = monotonic()
         symbols = [self.normalize_symbol(x) for x in selection.symbols()]
         symbols = list(dict.fromkeys(symbols))[:settings.scanner_max_symbols]
@@ -184,15 +206,22 @@ class AnalysisService:
         for start in range(0, len(symbols), settings.scanner_batch_size):
             batch = symbols[start:start + settings.scanner_batch_size]
             # Live Radar always bypasses the analysis cache. The request flag is retained for API compatibility.
-            results = await asyncio.gather(*(self.analyze_symbol(x, include_cross_market=False, force=True) for x in batch), return_exceptions=True)
+            async def analyze_for_scan(symbol: str):
+                if durable_transitions_only:
+                    return await self.analyze_symbol(symbol, include_cross_market=False, force=True,
+                        persist_actionable_only=True)
+                return await self.analyze_symbol(symbol, include_cross_market=False, force=True)
+            results = await asyncio.gather(*(analyze_for_scan(x) for x in batch), return_exceptions=True)
             for symbol, result in zip(batch, results):
                 if isinstance(result, SymbolAnalysis):
                     analyses.append(result)
                 else:
                     failed_symbols.append(symbol)
-                    logger.warning("Market scanner skipped %s: %s", symbol, result)
+                    logger.warning("scanner_symbol_skipped symbol=%s error_type=%s", symbol,
+                                   type(result).__name__)
         effective_policy = policy or self.alert_engine.policy
-        engine = self._alert_engines.setdefault(effective_policy, AlertEngine(effective_policy))
+        engine = self._alert_engines.setdefault(effective_policy, AlertEngine(effective_policy,
+            state_store=self.scanner_state_store))
         timestamps = [
             analysis.provider_timestamp or analysis.instrument.as_of
             for analysis in analyses
@@ -202,7 +231,7 @@ class AnalysisService:
         data_status, session, age = classify_data(provider_timestamp)
         if failed_symbols:
             data_status = DataStatus.ERROR
-        if data_status == DataStatus.LIVE and not failed_symbols:
+        if data_status == DataStatus.LIVE and session.value == "REGULAR" and not failed_symbols:
             candidates, alerts, filtered = engine.evaluate(analyses)
         elif data_status == DataStatus.MARKET_CLOSED and not failed_symbols:
             # Closed-market preparation is a read-only ranking of the latest

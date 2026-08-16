@@ -12,17 +12,20 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.config import settings
 from app.market_data.base import MarketDataError
-from app.market_data.massive import MassiveMarketDataProvider
+from app.market_data.massive import MassiveMarketDataProvider, log_configuration_metadata
 from app.service import AnalysisService
 from app.models import ContractFitCriteria, MarketScanRequest, NotificationPreferenceUpdate, OptionsPlanCriteria
 from app.engines.alerts import ScannerPolicy
 from app.notifications import NotificationService, PushoverProvider
 from app.futures_probe import load_nq_probe
 from app.options_intelligence import load_contract_shortlist, load_options_intelligence, load_options_plan
+from app.signal_log import NoOpSignalStore
+from app.persistence import create_stores
 from app.universe import UniverseSelection
 from app.api_contracts import (ApiErrorCode, ErrorDetail, ErrorResponse, HealthResponse,
     NotificationStatus, OptionsPlan, ReadinessResponse, AnalysisResponse, ScannerResponse,
     analysis_response, options_plan_response, scanner_response)
+from app.background_scanner import HostedBackgroundScanner
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # Never log provider URLs containing API credentials.
@@ -32,9 +35,21 @@ STATIC = Path(__file__).parent / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    log_configuration_metadata(settings.massive_api_key, settings.massive_base_url)
+    app.state.persistence = None
+    if settings.database_url:
+        app.state.persistence = create_stores(settings.database_url,
+            initialize=settings.database_backend.value == "sqlite",
+            connect_timeout=settings.db_connect_timeout_seconds, pool_size=settings.db_pool_size,
+            max_overflow=settings.db_max_overflow,
+            pool_timeout=settings.db_pool_timeout_seconds,
+            pool_recycle=settings.db_pool_recycle_seconds)
     if settings.massive_api_key:
         provider = MassiveMarketDataProvider(settings.massive_api_key, settings.massive_base_url)
-        app.state.service = AnalysisService(provider)
+        signal_store = (app.state.persistence.signal if app.state.persistence else
+                        (NoOpSignalStore() if settings.hosted else None))
+        app.state.service = AnalysisService(provider, signal_logger=signal_store,
+            scanner_state_store=app.state.persistence.scanner if app.state.persistence else None)
     else:
         app.state.service = None
         provider = None
@@ -42,18 +57,34 @@ async def lifespan(app: FastAPI):
     app.state.market_data_provider = provider
     push_provider = (PushoverProvider(settings.pushover_user_key, settings.pushover_app_token,
                                       settings.pushover_api_url)
-                     if settings.pushover_user_key and settings.pushover_app_token else None)
+                     if settings.notifications_enabled and settings.pushover_user_key
+                     and settings.pushover_app_token else None)
     app.state.notification_service = NotificationService(
-        push_provider, settings.notification_state_path, settings.public_app_base_url,
+        push_provider, None if settings.hosted or app.state.persistence else settings.notification_state_path,
+        settings.public_app_base_url,
         priorities={"RADAR": settings.pushover_priority_radar,
                     "READY": settings.pushover_priority_ready,
                     "INVALIDATED": settings.pushover_priority_invalidated,
                     "TOO_LATE": settings.pushover_priority_too_late},
+        store=app.state.persistence.notification if app.state.persistence else None,
     )
+    app.state.background_scanner = None
+    if settings.hosted_scanner_enabled:
+        if not settings.hosted:
+            raise RuntimeError("HOSTED_SCANNER_ENABLED requires APP_STORAGE_MODE=hosted")
+        if app.state.service is None or app.state.persistence is None:
+            raise RuntimeError("Hosted scanner requires Massive and durable database configuration")
+        app.state.background_scanner = HostedBackgroundScanner(app.state.service,
+            app.state.persistence.scanner, app.state.notification_service, settings)
+        app.state.background_scanner.start()
     yield
+    if app.state.background_scanner:
+        await app.state.background_scanner.stop()
     if provider:
         await provider.close()
     await app.state.notification_service.close()
+    if app.state.persistence:
+        app.state.persistence.signal.close()
 
 
 app = FastAPI(title="Trade Decision Engine", version="2.0.0", lifespan=lifespan)
@@ -113,25 +144,57 @@ async def dashboard() -> FileResponse:
 async def health() -> dict:
     return {"status": "ok", "market_data_configured": bool(settings.massive_api_key),
             "notifications_configured": bool(settings.pushover_user_key and settings.pushover_app_token),
-            "execution_enabled": False}
+            "execution_enabled": False, **_capabilities()}
+
+
+def _capabilities() -> dict[str, bool]:
+    market_data = bool(settings.massive_api_key)
+    durable_database = bool(settings.database_url) or not settings.hosted
+    return {
+        "interactive_analysis": market_data,
+        "market_data_configured": market_data,
+        "persistent_signal_store": durable_database,
+        "hosted_background_scanner": settings.hosted and settings.hosted_scanner_enabled,
+        "hosted_notification_deduplication": bool(settings.database_url),
+        "local_research": not settings.hosted,
+    }
 
 
 @app.get("/api/health", response_model=HealthResponse)
 @app.get("/api/v1/health", response_model=HealthResponse)
 async def api_health() -> HealthResponse:
-    return HealthResponse()
+    return HealthResponse(capabilities=_capabilities())
 
 
 @app.get("/api/readiness", response_model=ReadinessResponse)
 @app.get("/api/v1/readiness", response_model=ReadinessResponse)
 async def readiness(request: Request) -> ReadinessResponse:
-    signal_store = bool(getattr(getattr(request.app.state, "service", None), "signal_logger", None))
-    notification_store = bool(getattr(request.app.state, "notification_service", None))
+    signal_logger = getattr(getattr(request.app.state, "service", None), "signal_logger", None)
+    notification_service = getattr(request.app.state, "notification_service", None)
+    signal_store = bool(getattr(signal_logger, "persistent", False))
+    notification_store = bool(getattr(notification_service, "persistent", False))
     massive = bool(settings.massive_api_key)
-    return ReadinessResponse(ready=massive and signal_store and notification_store,
+    persistence = getattr(request.app.state, "persistence", None)
+    database_ready = bool(persistence.signal.ping()) if persistence else settings.database_backend.value == "sqlite"
+    if persistence:
+        signal_store = notification_store = database_ready
+    background_scanner = getattr(request.app.state, "background_scanner", None)
+    scanner_ready = background_scanner.ready() if background_scanner else not settings.hosted_scanner_enabled
+    return ReadinessResponse(ready=massive and database_ready and scanner_ready,
         massive_configured=massive,
         pushover_configured=bool(settings.pushover_user_key and settings.pushover_app_token),
-        signal_store_available=signal_store, notification_store_available=notification_store)
+        signal_store_available=signal_store, notification_store_available=notification_store,
+        scanner_ready=scanner_ready, capabilities=_capabilities())
+
+
+@app.get("/api/scanner/status")
+@app.get("/api/v1/scanner/status")
+async def hosted_scanner_status(request: Request) -> dict[str, object]:
+    scanner = getattr(request.app.state, "background_scanner", None)
+    if scanner is None:
+        return {"enabled": False, "running": False, "notifications_enabled": settings.notifications_enabled,
+                "stale": False}
+    return scanner.status()
 
 
 @app.get("/api/analysis")

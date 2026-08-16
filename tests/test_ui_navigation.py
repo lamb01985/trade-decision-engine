@@ -62,6 +62,7 @@ def test_closed_market_uses_existing_ui_as_next_session_preparation():
     assert "NEXT SESSION" in buckets and "WATCH" in buckets
     assert "priceLabel=isClosed?'LAST PRICE':'CURRENT PRICE'" in render
     assert "Fresh live analysis must revalidate this plan" in view
+    assert "PREP ONLY · NOT LIVE AUTHORIZATION" in APP_JS
 
 
 def test_closed_to_open_boundary_forces_fresh_analysis():
@@ -108,20 +109,44 @@ def test_scanner_context_is_preserved_and_state_change_disclosed():
 
 def test_pretrade_check_uses_only_backend_decision_facts():
     check = function_source("renderTradeCheck", "renderAnalysis")
-    for field in (
-        "setup_family",
-        "trigger",
-        "invalidation",
-        "target_1",
-        "target_2",
-        "structure_5m",
-        "structure_15m",
-        "structural_risk_reward",
-        "setup_state",
-        "action_now",
-    ):
-        assert field in check
-    assert "threshold" not in check and "score" not in check
+    assert "missing_confirmation" in check
+    assert "isReadyDecision(x)" in check
+    assert "No confirmation-condition detail supplied by the backend" in check
+    for inferred_check in ("structure_5m===", "every(value", "notExtended", "threshold", "score"):
+        assert inferred_check not in check
+
+
+def test_overview_has_explicit_confirmed_and_failure_sections():
+    render = function_source("renderAnalysis", "levelTitle")
+    assert "IF CONFIRMED" in render
+    assert "IF IT FAILS" in render
+    assert "x?.do_not_trade_if" in render
+    for field in ("p.trigger", "p.invalidation", "p.target_1", "p.target_2"):
+        assert field in render
+
+
+def test_candidate_first_glance_contains_backend_price_trigger_and_invalidation():
+    card = function_source("candidateCard", "bucketSection")
+    assert "candidate.price" in card
+    assert "candidate.trigger" in card
+    assert "candidate.invalidation" in card
+    assert "candidate-primary-facts" in card
+    assert card.index("candidate.invalidation") < card.index("<details>")
+
+
+def test_data_unavailable_is_distinct_from_no_trade():
+    scanner = function_source("scan", "rowIsCurrent")
+    assert "DATA UNAVAILABLE" in scanner
+    assert "This is not a NO TRADE result" in scanner
+    assert "rows=[]" in scanner
+
+
+def test_navigation_exposes_selected_tab_and_mobile_touch_targets():
+    switch = function_source("switchView", "openAnalysis")
+    assert "aria-selected" in switch
+    assert 'role="tablist"' in INDEX
+    assert 'role="tab"' in INDEX
+    assert "button,input,select,summary{min-height:42px}" in (ROOT / "app" / "static" / "readability.css").read_text()
 
 
 def test_heuristic_score_is_explicitly_not_probability():
@@ -159,7 +184,7 @@ def test_shared_typography_scale_covers_primary_and_secondary_surfaces():
 
 
 def test_levels_tab_exists_and_matches_finished_overview_style():
-    assert '<button data-view="levels">Levels</button>' in INDEX
+    assert 'data-view="levels" role="tab" aria-controls="levels"' in INDEX
     assert '<section id="levels" class="view">' in INDEX
     assert 'id="full-level-ladder"' in INDEX
     assert 'id="level-detail"' in INDEX
@@ -312,6 +337,7 @@ def test_current_price_is_first_class_in_hero_and_trade_plan():
     assert "provider_timestamp" in render
     assert "analysis_timestamp" in render
     assert "Trigger position alone does not confirm a trade." in render
+    assert "x?.action_now" in render
 
 
 def test_long_distance_to_trigger_wording_is_directionally_correct():

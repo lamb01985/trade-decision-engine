@@ -1,5 +1,7 @@
 import logging
+import re
 from datetime import date, datetime, timezone
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -7,6 +9,30 @@ from app.market_data.base import MarketDataError, MarketDataProvider, StockObser
 from app.models import Bar
 
 logger = logging.getLogger(__name__)
+_CREDENTIAL_PATTERN = re.compile(
+    r"(?i)(api[_-]?key|access[_-]?token|authorization)(\s*[=:]\s*)([^\s&,;]+)"
+)
+
+
+def _safe_response_excerpt(response: httpx.Response, api_key: str, limit: int = 300) -> str:
+    """Return bounded provider detail with credential-like values removed."""
+    excerpt = response.text[:limit].replace("\r", " ").replace("\n", " ")
+    if api_key:
+        excerpt = excerpt.replace(api_key, "[REDACTED]")
+    return _CREDENTIAL_PATTERN.sub(r"\1\2[REDACTED]", excerpt)
+
+
+def log_configuration_metadata(api_key: str | None, base_url: str) -> None:
+    """Log startup configuration presence without URL credentials or secret values."""
+    parsed = urlsplit(base_url)
+    hostname = parsed.hostname or ""
+    if ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    netloc = hostname + (f":{parsed.port}" if parsed.port is not None else "")
+    safe_base_url = urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+    logger.info("MASSIVE_API_KEY present: %s", str(bool(api_key)).lower())
+    logger.info("MASSIVE_API_KEY length: %d", len(api_key or ""))
+    logger.info("MASSIVE_BASE_URL: %s", safe_base_url)
 
 
 class MassiveMarketDataProvider(MarketDataProvider):
@@ -23,6 +49,15 @@ class MassiveMarketDataProvider(MarketDataProvider):
             logger.debug("Massive response path=%s status_code=%s", path, response.status_code)
             response.raise_for_status()
             payload = response.json()
+        except httpx.HTTPStatusError as exc:
+            response = exc.response
+            logger.warning(
+                "Massive request failed status=%s path=%s body=%s",
+                response.status_code,
+                response.request.url.path,
+                _safe_response_excerpt(response, self._api_key),
+            )
+            raise MarketDataError("Massive market-data request failed") from exc
         except (httpx.HTTPError, ValueError) as exc:
             # httpx exception text includes the full request URL. Since the
             # provider credential is a query parameter, never log the
