@@ -27,6 +27,8 @@ from app.api_contracts import (ApiErrorCode, ErrorDetail, ErrorResponse, HealthR
     analysis_response, options_plan_response, scanner_response)
 from app.evidence_analytics import (COHORT_KEYS, SLICE_KEYS, EvidenceAnalyticsError,
                                     build_evidence_artifact)
+from app.excursion_analytics import (COHORT_KEYS as EXCURSION_COHORT_KEYS,
+    SLICE_KEYS as EXCURSION_SLICE_KEYS, ExcursionAnalyticsError, build_excursion_artifact)
 from app.background_scanner import HostedBackgroundScanner
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -233,6 +235,39 @@ async def research_evidence(request: Request,
     except EvidenceAnalyticsError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return EvidenceArtifactResponse(**artifact)
+
+
+@app.get("/api/v1/research/excursions")
+async def research_excursions(request: Request, cohort_by: str = "setup_family",
+                              slice_by: str = "", horizons: str = "5,15,30,60,120,END_OF_SESSION",
+                              setup_family: str | None = None, direction: str | None = None,
+                              symbol: str | None = None, source_mode: str | None = None,
+                              reject_incompatible: bool = False) -> dict:
+    """Read-only Phase 4E interface over explicitly supplied historical bars."""
+    persistence = getattr(request.app.state, "persistence", None)
+    bars_by_symbol = getattr(request.app.state, "excursion_bars_by_symbol", None)
+    if persistence is None:
+        raise HTTPException(status_code=503, detail="Research persistence is unavailable")
+    if bars_by_symbol is None:
+        raise HTTPException(status_code=503,
+            detail="Point-in-time Phase 4E minute evidence is unavailable")
+    parsed_horizons = []
+    try:
+        for value in (item.strip().upper() for item in horizons.split(",") if item.strip()):
+            parsed_horizons.append(value if value == "END_OF_SESSION" else int(value))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Horizons must be positive minutes or END_OF_SESSION") from exc
+    filters = {key: value for key, value in {"setup_family": setup_family,
+        "direction": direction, "symbol": symbol.upper() if symbol else None,
+        "source_mode": source_mode.upper() if source_mode else None}.items() if value is not None}
+    try:
+        return build_excursion_artifact(persistence.research, bars_by_symbol,
+            horizons=parsed_horizons,
+            cohort_keys=_dimensions(cohort_by, EXCURSION_COHORT_KEYS, "cohort dimension"),
+            slice_keys=_dimensions(slice_by, EXCURSION_SLICE_KEYS, "slice dimension"),
+            filters=filters, reject_incompatible=reject_incompatible)
+    except ExcursionAnalyticsError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @app.get("/api/analysis")
