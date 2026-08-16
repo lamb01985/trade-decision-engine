@@ -22,6 +22,8 @@ def downgrade() -> None:
     for table in reversed(metadata.sorted_tables):
         # Later revisions may add tables to live metadata; revision 01 must only
         # remove the original Stage 2 schema it created.
-        if table.name == "scanner_heartbeats":
+        if table.name in {"scanner_heartbeats", "setup_instances", "setup_observations",
+                          "setup_outcome_assessments", "research_scan_cycles",
+                          "research_scan_symbol_coverage"}:
             continue
         op.drop_table(table.name)

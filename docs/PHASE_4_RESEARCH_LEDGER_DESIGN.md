@@ -575,3 +575,39 @@ provenance, not a duplicate market-data warehouse.
   expected versus successfully evaluated symbols.
 
 None of these blockers requires changing trading logic in Phase 4A.
+
+## Phase 4A.2 implementation status — 2026-08-16
+
+The measurement foundation is implemented locally at Alembic revision
+`20260816_03`. The migration is additive and creates `setup_instances`,
+`setup_observations`, `setup_outcome_assessments`, `research_scan_cycles`, and
+`research_scan_symbol_coverage`. It neither imports nor rewrites the existing
+operational signal history.
+
+The hosted durable scan path now persists every `CandidateEvidence` returned by
+the unchanged detector before `StandardDecision` selection, alert policy,
+ranking, or notification filtering. Family anchors and the first qualifying
+completed five-minute bar are detector provenance fields only; they do not
+participate in production setup selection. Repeated semantically identical
+polls reuse the deterministic instance and do not add observations. A state,
+data-quality, reappearance, or closure change appends a new row.
+
+Coverage records make `NO_SETUP` a successful symbol evaluation with no
+qualifying candidate. `NOT_OBSERVED` is used for missing, stale, failed, or
+unattempted coverage. `DATA_UNAVAILABLE` is an append-only quality event on an
+active current-session instance and freezes disappearance reconciliation. Two
+distinct successful completed-bar absences close an episode as
+`CONDITION_NO_LONGER_PRESENT`; one absence remains `ABSENCE_PENDING`.
+
+Outcome tables and the append-only `OutcomeAssessment` interface support
+`TARGET_FIRST`, `INVALIDATION_FIRST`, `NEITHER`, and `AMBIGUOUS`. No outcome
+evaluator is active in this phase. Continuous chronological evidence and the
+approved ambiguity policy remain prerequisites for enabling assessment writes
+in production.
+
+Validation completed against SQLite and a clean local PostgreSQL 16 database:
+the full migration chain, deterministic identity, concurrent poll
+deduplication, restart durability, coverage distinctions, disappearance grace,
+append-only outcomes, version retention, and timestamp no-lookahead checks all
+pass. AWS deployment, notification changes, frontend changes, new market-data
+sources, and trading-rule changes remain outside Phase 4A.2.

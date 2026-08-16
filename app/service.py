@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 from zoneinfo import ZoneInfo
@@ -21,7 +22,8 @@ from app.models import ActionNow, DashboardAnalysis, MarketScanResult, ScannerRo
 from app.universe import UniverseSelection
 from app.parameters import DEFAULT_PARAMETERS
 from app.signal_log import SignalLogger, SignalStore
-from app.persistence.contracts import ScannerStateStore
+from app.persistence.contracts import (ResearchLedger, ScanCycleCoverage,
+    ScanSymbolCoverage, ScannerStateStore)
 from app.decision_intelligence import build_decision_intelligence
 
 logger = logging.getLogger(__name__)
@@ -33,13 +35,15 @@ DEFAULT_WATCHLIST = ["QQQ", "SPY", "IWM", "SMH", "NVDA", "AMD", "AMZN", "META", 
 class AnalysisService:
     def __init__(self, provider: MarketDataProvider, cache_seconds: int = 60,
                  signal_logger: SignalStore | None = None,
-                 scanner_state_store: ScannerStateStore | None = None) -> None:
+                 scanner_state_store: ScannerStateStore | None = None,
+                 research_ledger: ResearchLedger | None = None) -> None:
         self.provider = provider
         self.cache_seconds = cache_seconds
         self._cache: dict[str, tuple[float, SymbolAnalysis]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._market_scan_lock = asyncio.Lock()
         self.scanner_state_store = scanner_state_store
+        self.research_ledger = research_ledger
         self.alert_engine = AlertEngine(ScannerPolicy(
             minimum_price=settings.scanner_min_price,
             minimum_average_dollar_volume=settings.scanner_min_average_dollar_volume,
@@ -77,7 +81,8 @@ class AnalysisService:
         })
 
     async def analyze_symbol(self, symbol: str, include_cross_market: bool = True, force: bool = False,
-                             persist_actionable_only: bool = False) -> SymbolAnalysis:
+                             persist_actionable_only: bool = False,
+                             research_cycle_id: str | None = None) -> SymbolAnalysis:
         symbol = self.normalize_symbol(symbol)
         cached = self._cache.get(symbol)
         if cached and not force and monotonic() - cached[0] < self.cache_seconds:
@@ -145,6 +150,25 @@ class AnalysisService:
                 current_price=observation.price, price_source=observation.source)
             result.decision_intelligence = build_decision_intelligence(decision, levels,
                 data_state=result.data_state, market_session=result.market_session)
+            if persist_actionable_only and self.research_ledger is not None:
+                if data_status == DataStatus.LIVE and session.value == "REGULAR":
+                    instance_ids = self.research_ledger.observe_candidates(
+                        result, evaluation.candidates, DEFAULT_PARAMETERS,
+                        cycle_id=research_cycle_id)
+                    result.research_candidate_instance_ids = instance_ids
+                    decision_bar = result.decision_bar_timestamp
+                    if decision_bar is None:
+                        raise RuntimeError("Research capture requires a completed decision bar")
+                    self.research_ledger.reconcile_symbol(symbol,
+                        session_date=decision_bar.astimezone(ET).date(),
+                        decision_bar_timestamp=decision_bar,
+                        observed_instance_ids=instance_ids)
+                else:
+                    self.research_ledger.record_data_unavailable(symbol,
+                        observed_at=analysis_timestamp,
+                        session_date=analysis_timestamp.astimezone(ET).date(),
+                        data_state=result.data_state,
+                        cycle_id=research_cycle_id)
             # Persistence/lifecycle state advances only from current regular-session data.
             # Premarket, after-hours, closed, stale, and unavailable observations remain
             # visible to callers but cannot manufacture a production state transition.
@@ -195,17 +219,22 @@ class AnalysisService:
 
     async def market_scan(self, selection: UniverseSelection, force: bool = False,
                           policy: ScannerPolicy | None = None,
-                          durable_transitions_only: bool = False) -> MarketScanResult:
+                          durable_transitions_only: bool = False,
+                          research_run_id: str | None = None) -> MarketScanResult:
         async with self._market_scan_lock:
             return await self._market_scan_unlocked(selection, force, policy,
-                                                    durable_transitions_only)
+                                                    durable_transitions_only, research_run_id)
 
     async def _market_scan_unlocked(self, selection: UniverseSelection, force: bool = False,
                                     policy: ScannerPolicy | None = None,
-                                    durable_transitions_only: bool = False) -> MarketScanResult:
+                                    durable_transitions_only: bool = False,
+                                    research_run_id: str | None = None) -> MarketScanResult:
         scan_started = monotonic()
+        scan_started_at = datetime.now(timezone.utc)
         symbols = [self.normalize_symbol(x) for x in selection.symbols()]
         symbols = list(dict.fromkeys(symbols))[:settings.scanner_max_symbols]
+        research_cycle_id = (str(uuid.uuid4()) if durable_transitions_only
+                             and self.research_ledger is not None else None)
         logger.info("scanner_start symbols_attempted=%d forced=%s", len(symbols), force)
         analyses: list[SymbolAnalysis] = []
         failed_symbols: list[str] = []
@@ -216,7 +245,7 @@ class AnalysisService:
             async def analyze_for_scan(symbol: str):
                 if durable_transitions_only:
                     return await self.analyze_symbol(symbol, include_cross_market=False, force=True,
-                        persist_actionable_only=True)
+                        persist_actionable_only=True, research_cycle_id=research_cycle_id)
                 return await self.analyze_symbol(symbol, include_cross_market=False, force=True)
             results = await asyncio.gather(*(analyze_for_scan(x) for x in batch), return_exceptions=True)
             for symbol, result in zip(batch, results):
@@ -258,7 +287,7 @@ class AnalysisService:
         logger.info("scanner_end symbols_attempted=%d successful=%d skipped=%d candidates=%d status=%s age_seconds=%s duration_seconds=%.3f",
                     len(symbols), len(analyses), len(failed_symbols), len(candidates),
                     data_status.value, age, duration)
-        return MarketScanResult(universe_size=len(symbols), analyzed=len(analyses), filtered_illiquid=filtered,
+        result = MarketScanResult(universe_size=len(symbols), analyzed=len(analyses), filtered_illiquid=filtered,
             candidates=candidates, alerts=alerts, data_as_of=provider_timestamp,
             provider_timestamp=provider_timestamp, analysis_timestamp=analysis_timestamp,
             data_age_seconds=age, data_status=data_status.value, market_session=session.value,
@@ -266,6 +295,57 @@ class AnalysisService:
             scan_duration_seconds=duration, failed_symbols=failed_symbols,
             message=None if candidates else ("MARKET CLOSED — historical analysis only." if data_status == DataStatus.MARKET_CLOSED else "NO HIGH-QUALITY SETUPS RIGHT NOW."),
             next_refresh_seconds=settings.scanner_refresh_seconds)
+        if research_cycle_id is not None and self.research_ledger is not None:
+            by_symbol = {item.instrument.symbol: item for item in analyses}
+            failed = set(failed_symbols)
+            coverage_rows = []
+            for symbol in symbols:
+                analysis = by_symbol.get(symbol)
+                if analysis is None:
+                    coverage_rows.append(ScanSymbolCoverage(symbol=symbol,
+                        attempt_status="PROVIDER_ERROR" if symbol in failed else "NOT_ATTEMPTED",
+                        result_classification="NOT_OBSERVED", market_timestamp=None,
+                        decision_bar_timestamp=None, provider_timestamp=None,
+                        data_age_seconds=None, data_status="ERROR", market_session=session.value,
+                        error_code="SYMBOL_EVALUATION_FAILED" if symbol in failed else None))
+                    self.research_ledger.record_data_unavailable(symbol,
+                        observed_at=analysis_timestamp,
+                        session_date=analysis_timestamp.astimezone(ET).date(),
+                        data_state="DATA_ERROR",
+                        cycle_id=research_cycle_id)
+                    continue
+                current = analysis.data_status == "LIVE" and analysis.market_session == "REGULAR"
+                if current:
+                    attempt_status = "SUCCESS"
+                    classification = ("QUALIFYING_CANDIDATES"
+                        if analysis.research_candidate_instance_ids else "NO_SETUP")
+                elif analysis.data_status in {"DELAYED", "STALE"}:
+                    attempt_status, classification = "DATA_STALE", "NOT_OBSERVED"
+                elif analysis.data_status in {"UNAVAILABLE", "ERROR"}:
+                    attempt_status, classification = "DATA_UNAVAILABLE", "NOT_OBSERVED"
+                else:
+                    # A successful closed-session provider read is coverage, but
+                    # it cannot prove regular-session NO_SETUP.
+                    attempt_status, classification = "SUCCESS", "NOT_OBSERVED"
+                coverage_rows.append(ScanSymbolCoverage(symbol=symbol,
+                    attempt_status=attempt_status, result_classification=classification,
+                    market_timestamp=analysis.decision_bar_timestamp,
+                    decision_bar_timestamp=analysis.decision_bar_timestamp,
+                    provider_timestamp=analysis.provider_timestamp,
+                    data_age_seconds=analysis.data_age_seconds,
+                    data_status=analysis.data_status, market_session=analysis.market_session,
+                    candidate_instance_ids=tuple(analysis.research_candidate_instance_ids)))
+            coverage_status = "COMPLETE" if not failed_symbols else "PARTIAL"
+            self.research_ledger.record_scan_cycle(ScanCycleCoverage(
+                cycle_id=research_cycle_id, scanner_scope="hosted",
+                run_id=research_run_id or getattr(self, "research_run_id", "request"),
+                started_at=scan_started_at, completed_at=analysis_timestamp,
+                coverage_status=coverage_status, market_session=session.value,
+                data_status=data_status.value, expected_symbols=tuple(symbols),
+                scanner_ready_at_start=True, scanner_ready_at_end=True,
+                symbols=tuple(coverage_rows),
+                error_code="PARTIAL_SYMBOL_FAILURE" if failed_symbols else None))
+        return result
 
     async def analyze(self) -> DashboardAnalysis:
         """V1 compatibility endpoint and response contract."""

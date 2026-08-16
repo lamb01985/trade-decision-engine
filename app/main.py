@@ -49,7 +49,8 @@ async def lifespan(app: FastAPI):
         signal_store = (app.state.persistence.signal if app.state.persistence else
                         (NoOpSignalStore() if settings.hosted else None))
         app.state.service = AnalysisService(provider, signal_logger=signal_store,
-            scanner_state_store=app.state.persistence.scanner if app.state.persistence else None)
+            scanner_state_store=app.state.persistence.scanner if app.state.persistence else None,
+            research_ledger=app.state.persistence.research if app.state.persistence else None)
     else:
         app.state.service = None
         provider = None

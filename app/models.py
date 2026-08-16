@@ -322,6 +322,8 @@ class SymbolAnalysis(BaseModel):
     price_source: str = "UNAVAILABLE"
     cache_hit: bool = False
     cache_age_seconds: int = 0
+    # Internal measurement handoff; excluded from every API serialization.
+    research_candidate_instance_ids: list[str] = Field(default_factory=list, exclude=True)
 
 
 class StandardDecision(BaseModel):

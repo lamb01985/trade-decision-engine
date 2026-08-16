@@ -8,7 +8,10 @@ import pytest
 
 from app.parameters import DEFAULT_PARAMETERS
 from app.persistence import create_stores
+from app.persistence.sqlalchemy_stores import EXPECTED_ALEMBIC_REVISION
 from app.service import AnalysisService
+from sqlalchemy import inspect, text
+from tests.test_research_ledger import analysis as research_analysis, candidate as research_candidate
 from tests.test_service_v2 import FakeProvider
 
 POSTGRES_URL = os.getenv("TEST_DATABASE_URL")
@@ -93,3 +96,34 @@ def test_postgres_eligible_notification_can_be_atomically_promoted():
         results = list(pool.map(lambda _: repository.reserve(event, "READY"), range(4)))
     assert results.count(True) == 1
     assert repository.notification(event)["status"] == "CLAIMED"
+
+
+def test_postgres_research_poll_deduplication_is_concurrency_safe_and_durable():
+    repository = stores().research
+    symbol = f"R{uuid.uuid4().hex[:7]}".upper()
+    current = research_analysis().model_copy(update={"instrument":
+        research_analysis().instrument.model_copy(update={"symbol": symbol}),
+        "decision": research_analysis().decision.model_copy(update={"symbol": symbol})})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        results = list(pool.map(lambda _: repository.observe_candidates(
+            current, [research_candidate()], DEFAULT_PARAMETERS), range(4)))
+    instance_ids = {item[0] for item in results}
+    assert len(instance_ids) == 1
+    instance_id = instance_ids.pop()
+    assert len(repository.instances(symbol)) == 1
+    assert len(repository.observations(instance_id)) == 1
+    repository.close()
+    reopened = stores().research
+    assert reopened.instances(symbol)[0]["setup_instance_id"] == instance_id
+
+
+def test_research_migration_is_additive_and_at_expected_head():
+    repository = stores().research
+    names = set(inspect(repository.engine).get_table_names())
+    assert {"signals", "signal_state_transitions", "setup_instances",
+        "setup_observations", "setup_outcome_assessments", "research_scan_cycles",
+        "research_scan_symbol_coverage"} <= names
+    with repository.engine.connect() as connection:
+        assert connection.execute(text("SELECT version_num FROM alembic_version")).scalar_one() == \
+            EXPECTED_ALEMBIC_REVISION
+        assert connection.execute(text("SELECT count(*) FROM signals")).scalar_one() >= 0

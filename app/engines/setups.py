@@ -30,6 +30,11 @@ class CandidateEvidence:
     trigger: float
     reasoning: tuple[str, ...]
     missing: tuple[str, ...]
+    # Research provenance only. These fields expose facts already used by the
+    # detector; they do not participate in setup selection or state logic.
+    anchor_type: str
+    anchor: dict[str, object]
+    qualifying_bar_at: datetime | None = None
 
 
 def completed_five_minute_bars(bars: list[Bar]) -> list[Bar]:
@@ -55,7 +60,8 @@ def _structure_targets(levels: list[PriceLevel], trigger: float, direction: str)
 
 
 def _break_candidate(family: SetupFamily, direction: str, level: float, bars: list[Bar],
-                     atr: float, rvol: float | None, p: EngineParameters) -> CandidateEvidence:
+                     atr: float, rvol: float | None, p: EngineParameters, *,
+                     anchor_type: str, anchor: dict[str, object]) -> CandidateEvidence:
     previous, latest = bars[-2], bars[-1]
     buffer, tolerance = atr*p.breakout_buffer_atr, atr*p.retest_tolerance_atr
     volume_ok = rvol is not None and rvol >= p.volume_confirmation_rvol
@@ -70,7 +76,16 @@ def _break_candidate(family: SetupFamily, direction: str, level: float, bars: li
     state = SetupProgress.CONFIRMED if accepted and volume_ok else SetupProgress.TRIGGERED if crossed else SetupProgress.WATCHING if near else SetupProgress.FORMING
     missing = () if state == SetupProgress.CONFIRMED else (("volume confirmation",) if accepted and not volume_ok else ("5m acceptance/retest", "relative-volume confirmation"))
     return CandidateEvidence(family, direction, state, level,
-        (f"Mapped trigger {level:.2f}", SETUP_RULES[family]), missing)
+        (f"Mapped trigger {level:.2f}", SETUP_RULES[family]), missing,
+        anchor_type, anchor, qualifying_bar_at=latest.timestamp)
+
+
+def _bar_times(*bars: Bar) -> list[str]:
+    return [bar.timestamp.isoformat() for bar in bars]
+
+
+def _level_anchor(level: PriceLevel) -> dict[str, object]:
+    return {"price": level.price, "level_types": sorted(set(level.types))}
 
 
 def detect_candidates(instrument: InstrumentAnalysis, levels: list[PriceLevel], bars: list[Bar],
@@ -91,15 +106,23 @@ def detect_candidates(instrument: InstrumentAnalysis, levels: list[PriceLevel], 
     aligned_long = f5.trend == f15.trend == Trend.BULLISH
     aligned_short = f5.trend == f15.trend == Trend.BEARISH
     if orh is not None and aligned_long:
-        candidates.append(_break_candidate(SetupFamily.OPENING_RANGE_BREAKOUT, "LONG", orh, five, atr, rvol, parameters))
+        candidates.append(_break_candidate(SetupFamily.OPENING_RANGE_BREAKOUT, "LONG", orh, five, atr, rvol, parameters,
+            anchor_type="OPENING_RANGE_HIGH", anchor={"price": orh, "role": "OPENING_RANGE_HIGH",
+                "opening_range_minutes": parameters.opening_range_minutes}))
     if orl is not None and aligned_short:
-        candidates.append(_break_candidate(SetupFamily.OPENING_RANGE_BREAKDOWN, "SHORT", orl, five, atr, rvol, parameters))
-    resistance = min((x.price for x in levels if x.price >= latest.close and "CURRENT_PRICE" not in x.types), default=None)
-    support = max((x.price for x in levels if x.price <= latest.close and "CURRENT_PRICE" not in x.types), default=None)
-    if resistance is not None and aligned_long:
-        candidates.append(_break_candidate(SetupFamily.BREAKOUT_RETEST, "LONG", resistance, five, atr, rvol, parameters))
-    if support is not None and aligned_short:
-        candidates.append(_break_candidate(SetupFamily.BREAKDOWN_RETEST, "SHORT", support, five, atr, rvol, parameters))
+        candidates.append(_break_candidate(SetupFamily.OPENING_RANGE_BREAKDOWN, "SHORT", orl, five, atr, rvol, parameters,
+            anchor_type="OPENING_RANGE_LOW", anchor={"price": orl, "role": "OPENING_RANGE_LOW",
+                "opening_range_minutes": parameters.opening_range_minutes}))
+    resistance_level = min((x for x in levels if x.price >= latest.close and "CURRENT_PRICE" not in x.types),
+        key=lambda item: item.price, default=None)
+    support_level = max((x for x in levels if x.price <= latest.close and "CURRENT_PRICE" not in x.types),
+        key=lambda item: item.price, default=None)
+    if resistance_level is not None and aligned_long:
+        candidates.append(_break_candidate(SetupFamily.BREAKOUT_RETEST, "LONG", resistance_level.price, five, atr, rvol, parameters,
+            anchor_type="MAPPED_RESISTANCE", anchor=_level_anchor(resistance_level)))
+    if support_level is not None and aligned_short:
+        candidates.append(_break_candidate(SetupFamily.BREAKDOWN_RETEST, "SHORT", support_level.price, five, atr, rvol, parameters,
+            anchor_type="MAPPED_SUPPORT", anchor=_level_anchor(support_level)))
     if vwap is not None:
         reclaimed = prior2.close < vwap and previous.close > vwap+buffer and latest.low <= vwap+vwap_tolerance and latest.close > vwap+buffer
         crossed_up = previous.close < vwap and latest.close > vwap+buffer
@@ -107,35 +130,61 @@ def detect_candidates(instrument: InstrumentAnalysis, levels: list[PriceLevel], 
         if reclaimed or crossed_up:
             candidates.append(CandidateEvidence(SetupFamily.VWAP_RECLAIM, "LONG",
                 SetupProgress.CONFIRMED if reclaimed and volume_ok else SetupProgress.TRIGGERED,
-                vwap, (SETUP_RULES[SetupFamily.VWAP_RECLAIM],), () if reclaimed and volume_ok else ("VWAP hold/retest", "relative-volume confirmation")))
+                vwap, (SETUP_RULES[SetupFamily.VWAP_RECLAIM],), () if reclaimed and volume_ok else ("VWAP hold/retest", "relative-volume confirmation"),
+                "SESSION_VWAP_RECLAIM", {"role": "SESSION_VWAP", "sequence_bar_times": _bar_times(prior2, previous, latest)},
+                qualifying_bar_at=latest.timestamp))
         if rejected:
             candidates.append(CandidateEvidence(SetupFamily.VWAP_REJECTION, "SHORT",
                 SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, vwap,
-                (SETUP_RULES[SetupFamily.VWAP_REJECTION],), () if volume_ok else ("relative-volume confirmation",)))
-    for level in [x.price for x in levels if "CURRENT_PRICE" not in x.types]:
+                (SETUP_RULES[SetupFamily.VWAP_REJECTION],), () if volume_ok else ("relative-volume confirmation",),
+                "SESSION_VWAP_REJECTION", {"role": "SESSION_VWAP", "sequence_bar_times": _bar_times(prior2, previous, latest)},
+                qualifying_bar_at=latest.timestamp))
+    for mapped_level in [x for x in levels if "CURRENT_PRICE" not in x.types]:
+        level = mapped_level.price
         failed_up = prior2.close > level+buffer and previous.close < level and latest.high >= level-tolerance and latest.close < level
         failed_down = prior2.close < level-buffer and previous.close > level and latest.low <= level+tolerance and latest.close > level
         if failed_up:
-            candidates.append(CandidateEvidence(SetupFamily.FAILED_BREAKOUT, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, level, (SETUP_RULES[SetupFamily.FAILED_BREAKOUT],), () if volume_ok else ("relative-volume confirmation",)))
+            candidates.append(CandidateEvidence(SetupFamily.FAILED_BREAKOUT, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, level, (SETUP_RULES[SetupFamily.FAILED_BREAKOUT],), () if volume_ok else ("relative-volume confirmation",),
+                "FAILED_STRUCTURAL_LEVEL", {**_level_anchor(mapped_level), "sequence_bar_times": _bar_times(prior2, previous, latest)},
+                qualifying_bar_at=latest.timestamp))
         if failed_down:
-            candidates.append(CandidateEvidence(SetupFamily.FAILED_BREAKDOWN, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, level, (SETUP_RULES[SetupFamily.FAILED_BREAKDOWN],), () if volume_ok else ("relative-volume confirmation",)))
+            candidates.append(CandidateEvidence(SetupFamily.FAILED_BREAKDOWN, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, level, (SETUP_RULES[SetupFamily.FAILED_BREAKDOWN],), () if volume_ok else ("relative-volume confirmation",),
+                "RECLAIMED_STRUCTURAL_LEVEL", {**_level_anchor(mapped_level), "sequence_bar_times": _bar_times(prior2, previous, latest)},
+                qualifying_bar_at=latest.timestamp))
     ema9 = f5.ema_9
     if aligned_long and prior2.low <= ema9+atr*parameters.trend_pullback_tolerance_atr and latest.close > previous.high:
-        candidates.append(CandidateEvidence(SetupFamily.TREND_PULLBACK, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, previous.high, (SETUP_RULES[SetupFamily.TREND_PULLBACK],), () if volume_ok else ("relative-volume confirmation",)))
+        candidates.append(CandidateEvidence(SetupFamily.TREND_PULLBACK, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, previous.high, (SETUP_RULES[SetupFamily.TREND_PULLBACK],), () if volume_ok else ("relative-volume confirmation",),
+            "PULLBACK_RESUMPTION_BAR", {"ema_role": "EMA_9", "pullback_bar_at": prior2.timestamp.isoformat(),
+                "reference_bar_at": previous.timestamp.isoformat(), "trigger": previous.high},
+                qualifying_bar_at=latest.timestamp))
     if aligned_short and prior2.high >= ema9-atr*parameters.trend_pullback_tolerance_atr and latest.close < previous.low:
-        candidates.append(CandidateEvidence(SetupFamily.TREND_PULLBACK, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, previous.low, (SETUP_RULES[SetupFamily.TREND_PULLBACK],), () if volume_ok else ("relative-volume confirmation",)))
+        candidates.append(CandidateEvidence(SetupFamily.TREND_PULLBACK, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, previous.low, (SETUP_RULES[SetupFamily.TREND_PULLBACK],), () if volume_ok else ("relative-volume confirmation",),
+            "PULLBACK_RESUMPTION_BAR", {"ema_role": "EMA_9", "pullback_bar_at": prior2.timestamp.isoformat(),
+                "reference_bar_at": previous.timestamp.isoformat(), "trigger": previous.low},
+                qualifying_bar_at=latest.timestamp))
     pause = previous.high-previous.low <= atr*parameters.momentum_pause_range_atr
     if aligned_long and pause and latest.close > previous.high+buffer:
-        candidates.append(CandidateEvidence(SetupFamily.MOMENTUM_CONTINUATION, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, previous.high, (SETUP_RULES[SetupFamily.MOMENTUM_CONTINUATION],), () if volume_ok else ("relative-volume confirmation",)))
+        candidates.append(CandidateEvidence(SetupFamily.MOMENTUM_CONTINUATION, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, previous.high, (SETUP_RULES[SetupFamily.MOMENTUM_CONTINUATION],), () if volume_ok else ("relative-volume confirmation",),
+            "MOMENTUM_PAUSE_BAR", {"pause_bar_at": previous.timestamp.isoformat(), "pause_high": previous.high,
+                "pause_low": previous.low, "breakout_buffer_atr": parameters.breakout_buffer_atr},
+                qualifying_bar_at=latest.timestamp))
     if aligned_short and pause and latest.close < previous.low-buffer:
-        candidates.append(CandidateEvidence(SetupFamily.MOMENTUM_CONTINUATION, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, previous.low, (SETUP_RULES[SetupFamily.MOMENTUM_CONTINUATION],), () if volume_ok else ("relative-volume confirmation",)))
+        candidates.append(CandidateEvidence(SetupFamily.MOMENTUM_CONTINUATION, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, previous.low, (SETUP_RULES[SetupFamily.MOMENTUM_CONTINUATION],), () if volume_ok else ("relative-volume confirmation",),
+            "MOMENTUM_PAUSE_BAR", {"pause_bar_at": previous.timestamp.isoformat(), "pause_high": previous.high,
+                "pause_low": previous.low, "breakout_buffer_atr": parameters.breakout_buffer_atr},
+                qualifying_bar_at=latest.timestamp))
     compression = five[-parameters.compression_lookback_bars-2:-2]
     comp_high, comp_low = max(x.high for x in compression), min(x.low for x in compression)
     if comp_high-comp_low <= atr*parameters.compression_range_atr:
+        compression_anchor = {"window_start_at": compression[0].timestamp.isoformat(),
+            "window_end_at": compression[-1].timestamp.isoformat(), "range_high": comp_high,
+            "range_low": comp_low, "acceptance_bar_times": _bar_times(previous, latest)}
         if previous.close > comp_high+buffer and latest.low <= comp_high+tolerance and latest.close > comp_high:
-            candidates.append(CandidateEvidence(SetupFamily.COMPRESSION_BREAK, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, comp_high, (SETUP_RULES[SetupFamily.COMPRESSION_BREAK],), () if volume_ok else ("relative-volume confirmation",)))
+            candidates.append(CandidateEvidence(SetupFamily.COMPRESSION_BREAK, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, comp_high, (SETUP_RULES[SetupFamily.COMPRESSION_BREAK],), () if volume_ok else ("relative-volume confirmation",),
+                "COMPRESSION_WINDOW", compression_anchor, qualifying_bar_at=latest.timestamp))
         elif previous.close < comp_low-buffer and latest.high >= comp_low-tolerance and latest.close < comp_low:
-            candidates.append(CandidateEvidence(SetupFamily.COMPRESSION_BREAK, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, comp_low, (SETUP_RULES[SetupFamily.COMPRESSION_BREAK],), () if volume_ok else ("relative-volume confirmation",)))
+            candidates.append(CandidateEvidence(SetupFamily.COMPRESSION_BREAK, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, comp_low, (SETUP_RULES[SetupFamily.COMPRESSION_BREAK],), () if volume_ok else ("relative-volume confirmation",),
+                "COMPRESSION_WINDOW", compression_anchor, qualifying_bar_at=latest.timestamp))
     return candidates
 
 

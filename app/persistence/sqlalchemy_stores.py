@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -11,16 +11,27 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 
-from app.models import Bar, StandardDecision, SymbolAnalysis
+from app.models import Bar, SetupProgress, StandardDecision, SymbolAnalysis
 from app.parameters import EngineParameters
-from app.persistence.contracts import PersistenceStores, ScannerHeartbeat, ScannerState
+from app.persistence.contracts import (OutcomeAssessment, PersistenceStores,
+    ScanCycleCoverage, ScannerHeartbeat, ScannerState)
 from app.persistence.schema import (metadata, notification_settings, notifications,
-    scanner_heartbeats, scanner_state, signal_outcomes, signal_state_transitions, signals)
+    research_scan_cycles, research_scan_symbol_coverage, scanner_heartbeats,
+    scanner_state, setup_instances, setup_observations,
+    setup_outcome_assessments, signal_outcomes, signal_state_transitions, signals)
+from app.research_identity import (CLOSURE_POLICY_VERSION,
+    CONTEXT_CONTRACT_VERSION, COVERAGE_CONTRACT_VERSION,
+    FEATURE_DEFINITION_VERSION, IDENTITY_SCHEMA_VERSION,
+    MEASUREMENT_CONTRACT_VERSION, OBSERVATION_CONTRACT_VERSION,
+    OCCURRENCE_POLICY_VERSION, REGIME_CONTRACT_VERSION,
+    SETUP_CATALOG_VERSION, anchor_key, canonical_json, setup_instance_id as make_setup_instance_id,
+    sha256_hex, universe_hash)
 from app.signal_identity import signal_fingerprint
+from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
 
 DEFAULT_PREFERENCES = {"radar": True, "ready": True, "invalidated": True,
                        "too_late": True, "allow_b_quality": False}
-EXPECTED_ALEMBIC_REVISION = "20260815_02"
+EXPECTED_ALEMBIC_REVISION = "20260816_03"
 
 
 def utcnow() -> datetime:
@@ -342,12 +353,445 @@ class SQLAlchemyNotificationStore(SQLAlchemyStore):
                 notifications.c.event_fingerprint.in_(keys)).limit(1)).first() is not None
 
 
+TERMINAL_CLOSURES = {"INVALIDATED", "EXPIRED", "CONDITION_NO_LONGER_PRESENT", "SESSION_ENDED"}
+OUTCOME_VALUES = {"TARGET_FIRST", "INVALIDATION_FIRST", "NEITHER", "AMBIGUOUS"}
+
+
+def _recommended_action(state: SetupProgress) -> str:
+    if state in {SetupProgress.FORMING, SetupProgress.WATCHING}:
+        return "MONITOR"
+    if state == SetupProgress.TRIGGERED:
+        return "WAIT_FOR_CONFIRMATION"
+    if state == SetupProgress.CONFIRMED:
+        return "READY"
+    if state == SetupProgress.INVALIDATED:
+        return "INVALIDATED"
+    if state == SetupProgress.TOO_LATE:
+        return "EXPIRED"
+    return "DATA_UNAVAILABLE"
+
+
+def _minutes_since_open(timestamp: datetime) -> int | None:
+    from app.engines.market import ET
+    local = aware(timestamp).astimezone(ET)
+    opened = datetime.combine(local.date(), time(9, 30), tzinfo=ET)
+    minutes = int((local - opened).total_seconds() // 60)
+    return minutes if minutes >= 0 else None
+
+
+class SQLAlchemyResearchLedger(SQLAlchemyStore):
+    """Append-only research adapter downstream of the frozen setup detector."""
+
+    def _dialect_insert(self, connection):
+        return postgres_insert if connection.dialect.name == "postgresql" else sqlite_insert
+
+    def _latest_observation(self, connection, instance_id: str):
+        return connection.execute(select(setup_observations).where(
+            setup_observations.c.setup_instance_id == instance_id).order_by(
+                setup_observations.c.market_timestamp.desc(),
+                setup_observations.c.created_at.desc()).limit(1)).mappings().first()
+
+    def _active_instance(self, connection, *, symbol: str, session_date: date,
+                         family: str, direction: str, anchor_digest: str,
+                         engine_version: str, setup_rules_version: str,
+                         parameter_version: str):
+        rows = connection.execute(select(setup_instances).where(
+            setup_instances.c.symbol == symbol.upper(),
+            setup_instances.c.session_date == session_date,
+            setup_instances.c.setup_family == family,
+            setup_instances.c.direction == direction,
+            setup_instances.c.anchor_key == anchor_digest,
+            setup_instances.c.engine_version == engine_version,
+            setup_instances.c.setup_rules_version == setup_rules_version,
+            setup_instances.c.parameter_version == parameter_version,
+        ).order_by(setup_instances.c.episode_started_at.desc())).mappings()
+        for row in rows:
+            latest = self._latest_observation(connection, row["setup_instance_id"])
+            if latest is None or latest["closure_reason"] not in TERMINAL_CLOSURES:
+                return row
+        return None
+
+    @staticmethod
+    def _selected(analysis: SymbolAnalysis, candidate) -> bool:
+        decision = analysis.decision
+        return bool(decision and decision.setup_family == candidate.family
+                    and decision.direction == candidate.direction
+                    and decision.trigger is not None
+                    and abs(decision.trigger - candidate.trigger) < 0.0001)
+
+    @staticmethod
+    def _levels(analysis: SymbolAnalysis) -> list[dict[str, Any]]:
+        return [{"price": item.price, "types": list(item.types),
+                 "importance": item.importance.value, "distance": item.distance,
+                 "distance_pct": item.distance_pct, "position": item.position,
+                 "confluence": item.confluence} for item in analysis.levels]
+
+    @staticmethod
+    def _market_context(analysis: SymbolAnalysis) -> dict[str, Any]:
+        instrument = analysis.instrument
+        frames = {name: frame.model_dump(mode="json") for name, frame in instrument.timeframes.items()}
+        return {
+            "symbol_context": {
+                "as_of": instrument.as_of.isoformat() if instrument.as_of else None,
+                "timeframes": frames,
+                "high_of_day": instrument.high_of_day, "low_of_day": instrument.low_of_day,
+                "prior_day_high": instrument.prior_day_high,
+                "prior_day_low": instrument.prior_day_low,
+                "prior_day_close": instrument.prior_day_close,
+                "opening_range_high": instrument.opening_range_high,
+                "opening_range_low": instrument.opening_range_low,
+                "premarket_high": instrument.premarket_high,
+                "premarket_low": instrument.premarket_low,
+                "change_pct": instrument.change_pct,
+                "average_dollar_volume": instrument.average_dollar_volume,
+                "atr_5m": instrument.atr_5m,
+            },
+            "core_indexes": {symbol: {"availability": "UNAVAILABLE", "reason": "NOT_SYNCHRONIZED_V1"}
+                             for symbol in ("SPY", "QQQ", "IWM")},
+            "vix": {"availability": "UNAVAILABLE", "reason": "SOURCE_NOT_VALIDATED"},
+            "nq": {"availability": "UNAVAILABLE", "reason": "SOURCE_NOT_VALIDATED"},
+            "sector": {"availability": "UNAVAILABLE", "reason": "MAPPING_NOT_CONFIGURED"},
+            "breadth": {"availability": "UNAVAILABLE", "reason": "NOT_IN_CONTEXT_V1"},
+            "options_gex": {"availability": "NOT_APPLICABLE", "reason": "EXPERIMENTAL_EXCLUDED"},
+            "regime": {"trend": "UNAVAILABLE", "volatility_level": "UNAVAILABLE",
+                       "volatility_change": "UNAVAILABLE"},
+        }
+
+    def observe_candidates(self, analysis: SymbolAnalysis, candidates,
+                           parameters: EngineParameters, *, cycle_id: str | None = None) -> list[str]:
+        decision_bar = analysis.decision_bar_timestamp or analysis.instrument.as_of
+        observed_at = analysis.analysis_timestamp or utcnow()
+        if decision_bar is None:
+            raise ValueError("Research observations require a completed decision bar timestamp")
+        if analysis.instrument.as_of is not None and aware(analysis.instrument.as_of) > aware(decision_bar):
+            raise ValueError("Point-in-time features cannot be newer than the completed decision bar")
+        from app.engines.market import ET
+        session_day = aware(decision_bar).astimezone(ET).date()
+        parameter_snapshot = parameters.as_dict()
+        parameter_hash = hashlib_snapshot(parameter_snapshot)
+        result: list[str] = []
+        with self.engine.begin() as connection:
+            dialect_insert = self._dialect_insert(connection)
+            for candidate in candidates:
+                first_qualifying_bar = candidate.qualifying_bar_at or decision_bar
+                if aware(first_qualifying_bar) > aware(decision_bar):
+                    raise ValueError("Candidate qualification cannot be newer than the decision bar")
+                family = candidate.family.value
+                anchor_payload = dict(candidate.anchor)
+                if candidate.anchor_type.startswith("OPENING_RANGE") or candidate.anchor_type.startswith("SESSION_VWAP"):
+                    anchor_payload["session_date"] = session_day.isoformat()
+                anchor_digest = anchor_key(candidate.anchor_type, anchor_payload)
+                selected = self._selected(analysis, candidate)
+                decision = analysis.decision if selected else None
+                state = (decision.setup_state if decision and decision.setup_state in {
+                    SetupProgress.TOO_LATE, SetupProgress.INVALIDATED}
+                         else candidate.state)
+                active = self._active_instance(connection, symbol=analysis.instrument.symbol,
+                    session_date=session_day, family=family, direction=candidate.direction,
+                    anchor_digest=anchor_digest, engine_version=ENGINE_VERSION,
+                    setup_rules_version=SETUP_RULES_VERSION, parameter_version=PARAMETER_VERSION)
+                if active is None:
+                    instance_id = make_setup_instance_id(symbol=analysis.instrument.symbol,
+                        session_date=session_day, setup_family=family, direction=candidate.direction,
+                        family_anchor_type=candidate.anchor_type, family_anchor=anchor_payload,
+                        first_qualifying_bar_at=first_qualifying_bar, engine_version=ENGINE_VERSION,
+                        setup_rules_version=SETUP_RULES_VERSION, parameter_version=PARAMETER_VERSION)
+                    source_fingerprint = (signal_fingerprint(symbol=decision.symbol,
+                        setup_family=family, direction=candidate.direction, trigger=candidate.trigger,
+                        session=decision_bar, engine_version=ENGINE_VERSION,
+                        setup_rules_version=SETUP_RULES_VERSION) if selected and decision else None)
+                    instance_values = dict(setup_instance_id=instance_id,
+                        identity_schema_version=IDENTITY_SCHEMA_VERSION,
+                        occurrence_policy_version=OCCURRENCE_POLICY_VERSION,
+                        measurement_contract_version=MEASUREMENT_CONTRACT_VERSION,
+                        symbol=analysis.instrument.symbol.upper(), session_date=session_day,
+                        setup_family=family, direction=candidate.direction,
+                        family_anchor_type=candidate.anchor_type, anchor_key=anchor_digest,
+                        family_anchor_json=anchor_payload, episode_started_at=first_qualifying_bar,
+                        first_observed_at=observed_at, source_signal_fingerprint=source_fingerprint,
+                        engine_version=ENGINE_VERSION, setup_rules_version=SETUP_RULES_VERSION,
+                        parameter_version=PARAMETER_VERSION, parameter_snapshot_hash=parameter_hash,
+                        setup_catalog_version=SETUP_CATALOG_VERSION,
+                        research_status="PRODUCTION", actionable_allowed=True, created_at=utcnow())
+                    inserted = connection.execute(
+                        dialect_insert(setup_instances).values(**instance_values).on_conflict_do_nothing())
+                    if inserted.rowcount == 0:
+                        stored = connection.execute(select(setup_instances.c.setup_instance_id).where(
+                            setup_instances.c.symbol == analysis.instrument.symbol.upper(),
+                            setup_instances.c.session_date == session_day,
+                            setup_instances.c.setup_family == family,
+                            setup_instances.c.direction == candidate.direction,
+                            setup_instances.c.anchor_key == anchor_digest,
+                            setup_instances.c.episode_started_at == first_qualifying_bar,
+                            setup_instances.c.engine_version == ENGINE_VERSION,
+                            setup_instances.c.setup_rules_version == SETUP_RULES_VERSION,
+                            setup_instances.c.parameter_version == PARAMETER_VERSION,
+                        )).scalar_one()
+                        instance_id = stored
+                else:
+                    instance_id = active["setup_instance_id"]
+
+                confirmation = [
+                    {"id": sha256_hex({"kind": "evidence", "label": item})[:16],
+                     "label": item, "state": "PASS", "required": True}
+                    for item in candidate.reasoning
+                ] + [
+                    {"id": sha256_hex({"kind": "missing", "label": item})[:16],
+                     "label": item, "state": "PENDING", "required": True}
+                    for item in candidate.missing
+                ]
+                plan = decision if selected else None
+                invalidation = plan.invalidation if plan else None
+                initial_risk = (abs(candidate.trigger - invalidation)
+                                if invalidation is not None and candidate.trigger != invalidation else None)
+                data_quality = {"data_status": analysis.data_status, "data_state": analysis.data_state,
+                    "market_session": analysis.market_session, "provider_timestamp": (
+                        analysis.provider_timestamp.isoformat() if analysis.provider_timestamp else None),
+                    "analysis_timestamp": observed_at.isoformat(), "data_age_seconds": analysis.data_age_seconds,
+                    "decision_bar_timestamp": decision_bar.isoformat(), "missing_fields": []}
+                semantic_payload = {"state": state.value, "action": _recommended_action(state),
+                    "trigger": candidate.trigger, "invalidation": invalidation,
+                    "target_1": plan.target_1 if plan else None, "target_2": plan.target_2 if plan else None,
+                    "confirmation": confirmation, "missing": list(candidate.missing),
+                    "data_state": analysis.data_state, "versions": [ENGINE_VERSION,
+                        SETUP_RULES_VERSION, PARAMETER_VERSION, OBSERVATION_CONTRACT_VERSION]}
+                semantic_digest = sha256_hex(semantic_payload)
+                latest = self._latest_observation(connection, instance_id)
+                if latest is not None and latest["event_type"] == "CANDIDATE" \
+                        and latest["semantic_fingerprint"] == semantic_digest:
+                    result.append(instance_id)
+                    continue
+                event_type = ("CLOSURE" if state in {
+                    SetupProgress.TOO_LATE, SetupProgress.INVALIDATED} else "CANDIDATE")
+                closure_reason = ("EXPIRED" if state == SetupProgress.TOO_LATE else
+                    "INVALIDATED" if state == SetupProgress.INVALIDATED else None)
+                observation_fingerprint = sha256_hex({"instance": instance_id,
+                    "semantic": semantic_digest, "market_timestamp": decision_bar,
+                    "event_type": event_type})
+                levels = self._levels(analysis)
+                values = dict(observation_id=str(uuid.uuid4()), setup_instance_id=instance_id,
+                    cycle_id=cycle_id, observation_fingerprint=observation_fingerprint,
+                    semantic_fingerprint=semantic_digest, event_type=event_type,
+                    closure_reason=closure_reason,
+                    observed_at=observed_at, market_timestamp=decision_bar,
+                    decision_bar_timestamp=decision_bar, feature_source_at=decision_bar,
+                    market_session=analysis.market_session,
+                    minutes_since_regular_open=_minutes_since_open(decision_bar),
+                    day_of_week=aware(decision_bar).astimezone(ET).weekday(),
+                    setup_family=family, direction=candidate.direction, setup_state=state.value,
+                    recommended_action=_recommended_action(state),
+                    quality=plan.quality.value if plan else None, score=analysis.setup_score.score,
+                    rank_in_scan=None, universe_size=None,
+                    qualifying_candidate_count=len(candidates),
+                    decision_reference_price=analysis.instrument.timeframes["1m"].price,
+                    trigger=candidate.trigger, decision_zone_lower=candidate.trigger,
+                    decision_zone_upper=candidate.trigger, invalidation=invalidation,
+                    target_1=plan.target_1 if plan else None, target_2=plan.target_2 if plan else None,
+                    initial_risk=initial_risk,
+                    initial_risk_reward=plan.structural_risk_reward if plan else None,
+                    nearest_support=plan.nearest_support if plan else None,
+                    nearest_resistance=plan.nearest_resistance if plan else None,
+                    score_factors=[item.model_dump(mode="json") for item in analysis.setup_score.factors],
+                    levels_snapshot=levels, confirmation_components=confirmation,
+                    missing_confirmation=list(candidate.missing),
+                    market_context=self._market_context(analysis), data_quality=data_quality,
+                    feature_manifest={"available": ["symbol_context", "levels", "score_factors",
+                        "candidate_state", "candidate_anchor"],
+                        "unavailable": ["synchronized_indexes", "vix", "nq", "sector", "breadth"],
+                        "not_applicable": ["options_gex"], "candidate_anchor": anchor_payload},
+                    parameter_snapshot=parameter_snapshot, engine_version=ENGINE_VERSION,
+                    setup_rules_version=SETUP_RULES_VERSION, parameter_version=PARAMETER_VERSION,
+                    parameter_snapshot_hash=parameter_hash,
+                    observation_contract_version=OBSERVATION_CONTRACT_VERSION,
+                    feature_definition_version=FEATURE_DEFINITION_VERSION,
+                    context_contract_version=CONTEXT_CONTRACT_VERSION,
+                    regime_contract_version=REGIME_CONTRACT_VERSION,
+                    closure_policy_version=CLOSURE_POLICY_VERSION,
+                    setup_catalog_version=SETUP_CATALOG_VERSION, research_status="PRODUCTION",
+                    actionable_allowed=True, created_at=utcnow())
+                connection.execute(dialect_insert(setup_observations).values(**values).on_conflict_do_nothing(
+                    index_elements=[setup_observations.c.observation_fingerprint]))
+                result.append(instance_id)
+        return list(dict.fromkeys(result))
+
+    def _append_derived_event(self, connection, source, *, event_type: str,
+                              market_timestamp: datetime, closure_reason: str | None,
+                              data_state: str | None = None, cycle_id: str | None = None) -> None:
+        semantic = sha256_hex({"event_type": event_type, "closure_reason": closure_reason,
+            "data_state": data_state, "prior_semantic": source["semantic_fingerprint"]})
+        fingerprint = sha256_hex({"instance": source["setup_instance_id"], "semantic": semantic,
+            "market_timestamp": market_timestamp, "event_type": event_type})
+        values = {key: source[key] for key in setup_observations.c.keys()
+                  if key not in {"observation_id", "observation_fingerprint", "semantic_fingerprint",
+                                 "event_type", "closure_reason", "observed_at", "market_timestamp",
+                                 "cycle_id", "created_at"}}
+        values.update(observation_id=str(uuid.uuid4()), cycle_id=cycle_id,
+            observation_fingerprint=fingerprint, semantic_fingerprint=semantic,
+            event_type=event_type, closure_reason=closure_reason, observed_at=utcnow(),
+            market_timestamp=market_timestamp, created_at=utcnow())
+        if data_state is not None:
+            quality = dict(values["data_quality"])
+            quality["data_state"] = data_state
+            values["data_quality"] = quality
+            values["recommended_action"] = "DATA_UNAVAILABLE"
+        dialect_insert = self._dialect_insert(connection)
+        connection.execute(dialect_insert(setup_observations).values(**values).on_conflict_do_nothing(
+            index_elements=[setup_observations.c.observation_fingerprint]))
+
+    def reconcile_symbol(self, symbol: str, *, session_date: date,
+                         decision_bar_timestamp: datetime,
+                         observed_instance_ids) -> None:
+        observed = set(observed_instance_ids)
+        with self.engine.begin() as connection:
+            rows = connection.execute(select(setup_instances).where(
+                setup_instances.c.symbol == symbol.upper(),
+                setup_instances.c.session_date == session_date)).mappings()
+            for instance in rows:
+                instance_id = instance["setup_instance_id"]
+                latest = self._latest_observation(connection, instance_id)
+                if latest is None or latest["closure_reason"] in TERMINAL_CLOSURES:
+                    continue
+                if instance_id in observed:
+                    continue
+                if latest["event_type"] == "ABSENCE_PENDING":
+                    if aware(latest["market_timestamp"]) == aware(decision_bar_timestamp):
+                        continue
+                    self._append_derived_event(connection, latest, event_type="CLOSURE",
+                        market_timestamp=decision_bar_timestamp,
+                        closure_reason="CONDITION_NO_LONGER_PRESENT")
+                else:
+                    self._append_derived_event(connection, latest, event_type="ABSENCE_PENDING",
+                        market_timestamp=decision_bar_timestamp, closure_reason=None)
+
+    def record_data_unavailable(self, symbol: str, *, observed_at: datetime,
+                                session_date: date, data_state: str,
+                                cycle_id: str | None = None) -> None:
+        with self.engine.begin() as connection:
+            rows = connection.execute(select(setup_instances).where(
+                setup_instances.c.symbol == symbol.upper(),
+                setup_instances.c.session_date == session_date).order_by(
+                    setup_instances.c.episode_started_at.desc())).mappings()
+            for instance in rows:
+                latest = self._latest_observation(connection, instance["setup_instance_id"])
+                if latest is None or latest["closure_reason"] in TERMINAL_CLOSURES:
+                    continue
+                if latest["event_type"] == "DATA_UNAVAILABLE" \
+                        and latest["data_quality"].get("data_state") == data_state:
+                    continue
+                self._append_derived_event(connection, latest, event_type="DATA_UNAVAILABLE",
+                    market_timestamp=observed_at, closure_reason=None,
+                    data_state=data_state, cycle_id=cycle_id)
+
+    def record_scan_cycle(self, coverage: ScanCycleCoverage) -> None:
+        expected = tuple(sorted({symbol.upper() for symbol in coverage.expected_symbols}))
+        children = {item.symbol.upper(): item for item in coverage.symbols}
+        if set(children) != set(expected):
+            raise ValueError("Scan coverage must contain exactly one fact for every expected symbol")
+        attempted = sum(item.attempt_status != "NOT_ATTEMPTED" for item in children.values())
+        succeeded = sum(item.attempt_status == "SUCCESS" for item in children.values())
+        failed = sum(item.attempt_status not in {"SUCCESS", "NOT_ATTEMPTED"} for item in children.values())
+        not_attempted = len(expected) - attempted
+        provider_times = [aware(item.provider_timestamp) for item in children.values()
+                          if item.provider_timestamp is not None]
+        ages = [item.data_age_seconds for item in children.values() if item.data_age_seconds is not None]
+        now = utcnow()
+        cycle_values = dict(cycle_id=coverage.cycle_id, scanner_scope=coverage.scanner_scope,
+            run_id=coverage.run_id, started_at=coverage.started_at, completed_at=coverage.completed_at,
+            coverage_status=coverage.coverage_status, market_session=coverage.market_session,
+            data_status=coverage.data_status, expected_universe_count=len(expected),
+            universe_hash=universe_hash(expected, "hosted-universe-v1"),
+            universe_version="hosted-universe-v1", attempted_count=attempted,
+            succeeded_count=succeeded, failed_count=failed, not_attempted_count=not_attempted,
+            earliest_provider_timestamp=min(provider_times) if provider_times else None,
+            latest_provider_timestamp=max(provider_times) if provider_times else None,
+            maximum_data_age_seconds=max(ages) if ages else None,
+            scanner_ready_at_start=coverage.scanner_ready_at_start,
+            scanner_ready_at_end=coverage.scanner_ready_at_end,
+            engine_version=ENGINE_VERSION, setup_rules_version=SETUP_RULES_VERSION,
+            parameter_version=PARAMETER_VERSION, scanner_config_version="hosted-scanner-v1",
+            occurrence_policy_version=OCCURRENCE_POLICY_VERSION,
+            measurement_contract_version=MEASUREMENT_CONTRACT_VERSION,
+            coverage_contract_version=COVERAGE_CONTRACT_VERSION,
+            error_code=coverage.error_code[:128] if coverage.error_code else None, created_at=now)
+        with self.engine.begin() as connection:
+            dialect_insert = self._dialect_insert(connection)
+            connection.execute(dialect_insert(research_scan_cycles).values(**cycle_values).on_conflict_do_nothing(
+                index_elements=[research_scan_cycles.c.cycle_id]))
+            for symbol in expected:
+                item = children[symbol]
+                values = dict(cycle_id=coverage.cycle_id, symbol=symbol,
+                    attempt_status=item.attempt_status,
+                    result_classification=item.result_classification,
+                    market_timestamp=item.market_timestamp,
+                    decision_bar_timestamp=item.decision_bar_timestamp,
+                    provider_timestamp=item.provider_timestamp, data_age_seconds=item.data_age_seconds,
+                    data_status=item.data_status, market_session=item.market_session,
+                    candidate_count=len(item.candidate_instance_ids),
+                    candidate_instance_ids=list(item.candidate_instance_ids),
+                    error_code=item.error_code[:128] if item.error_code else None, created_at=now)
+                connection.execute(dialect_insert(research_scan_symbol_coverage).values(**values).on_conflict_do_nothing(
+                    index_elements=[research_scan_symbol_coverage.c.cycle_id,
+                                    research_scan_symbol_coverage.c.symbol]))
+
+    def append_outcome(self, assessment: OutcomeAssessment) -> bool:
+        if assessment.primary_outcome not in OUTCOME_VALUES:
+            raise ValueError("Unsupported primary outcome")
+        if aware(assessment.evidence_cutoff_at) < aware(assessment.evidence_start_at):
+            raise ValueError("Outcome evidence cutoff precedes its start")
+        values = dict(assessment.__dict__)
+        values["evidence_json"] = dict(values.pop("evidence") or {})
+        values["created_at"] = utcnow()
+        try:
+            with self.engine.begin() as connection:
+                connection.execute(insert(setup_outcome_assessments).values(**values))
+            return True
+        except IntegrityError:
+            return False
+
+    def instances(self, symbol: str | None = None) -> list[Mapping[str, Any]]:
+        statement = select(setup_instances).order_by(setup_instances.c.episode_started_at)
+        if symbol:
+            statement = statement.where(setup_instances.c.symbol == symbol.upper())
+        with self.engine.connect() as connection:
+            return list(connection.execute(statement).mappings())
+
+    def observations(self, setup_instance_id: str) -> list[Mapping[str, Any]]:
+        with self.engine.connect() as connection:
+            return list(connection.execute(select(setup_observations).where(
+                setup_observations.c.setup_instance_id == setup_instance_id).order_by(
+                    setup_observations.c.market_timestamp, setup_observations.c.created_at)).mappings())
+
+    def scan_cycle(self, cycle_id: str) -> Mapping[str, Any] | None:
+        with self.engine.connect() as connection:
+            return connection.execute(select(research_scan_cycles).where(
+                research_scan_cycles.c.cycle_id == cycle_id)).mappings().first()
+
+    def outcome_assessments(self, setup_instance_id: str) -> list[Mapping[str, Any]]:
+        with self.engine.connect() as connection:
+            return list(connection.execute(select(setup_outcome_assessments).where(
+                setup_outcome_assessments.c.setup_instance_id == setup_instance_id).order_by(
+                    setup_outcome_assessments.c.computed_at)).mappings())
+
+
+def hashlib_snapshot(snapshot: Mapping[str, Any]) -> str:
+    # Parameter hashes retain the complete numeric representation; identity
+    # canonicalization rounds only price anchors per the measurement contract.
+    return __import__("hashlib").sha256(json_bytes(snapshot)).hexdigest()
+
+
+def json_bytes(value: Mapping[str, Any]) -> bytes:
+    import json
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
 class SQLiteSignalStore(SQLAlchemySignalStore): pass
 class SQLiteScannerStateStore(SQLAlchemyScannerStateStore): pass
 class SQLiteNotificationStore(SQLAlchemyNotificationStore): pass
+class SQLiteResearchLedger(SQLAlchemyResearchLedger): pass
 class PostgresSignalStore(SQLAlchemySignalStore): pass
 class PostgresScannerStateStore(SQLAlchemyScannerStateStore): pass
 class PostgresNotificationStore(SQLAlchemyNotificationStore): pass
+class PostgresResearchLedger(SQLAlchemyResearchLedger): pass
 
 
 def create_stores(database_url: str, *, initialize: bool = False, connect_timeout: int = 5,
@@ -355,8 +799,10 @@ def create_stores(database_url: str, *, initialize: bool = False, connect_timeou
                   pool_recycle: int = 300) -> PersistenceStores:
     engine = _engine(database_url, connect_timeout, pool_size, max_overflow,
                      pool_timeout, pool_recycle)
-    classes = (PostgresSignalStore, PostgresScannerStateStore, PostgresNotificationStore) if database_url.startswith("postgresql") else (
-        SQLiteSignalStore, SQLiteScannerStateStore, SQLiteNotificationStore)
+    classes = (PostgresSignalStore, PostgresScannerStateStore, PostgresNotificationStore,
+               PostgresResearchLedger) if database_url.startswith("postgresql") else (
+        SQLiteSignalStore, SQLiteScannerStateStore, SQLiteNotificationStore,
+        SQLiteResearchLedger)
     stores = PersistenceStores(*(cls(engine) for cls in classes))
     if initialize: stores.signal.initialize()
     return stores

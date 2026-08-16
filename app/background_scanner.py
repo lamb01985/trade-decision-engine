@@ -42,6 +42,9 @@ class HostedBackgroundScanner:
         self.notifications = notifications
         self.config = config
         self.owner_id = uuid.uuid4().hex
+        # AnalysisService consumes this only as non-secret scan-coverage metadata.
+        # Keeping it as service state preserves compatibility with test/fake scan services.
+        setattr(self.service, "research_run_id", self.owner_id)
         self.runtime = ScannerRuntimeStatus(enabled=True)
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
