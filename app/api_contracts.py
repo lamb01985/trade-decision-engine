@@ -10,7 +10,7 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from app.models import (MarketScanResult, MarketSetupCandidate, OptionsPlanResult,
+from app.models import (DecisionIntelligence, MarketScanResult, MarketSetupCandidate, OptionsPlanResult,
                         PriceLevel, SymbolAnalysis)
 from app.signal_identity import signal_fingerprint
 from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
@@ -118,6 +118,7 @@ class AnalysisResponse(BaseModel):
     structure_15m: str | None = None
     important_levels: list[Level] = Field(default_factory=list)
     full_levels: list[Level] = Field(default_factory=list)
+    decision_intelligence: DecisionIntelligence | None = None
 
 
 class ScannerCandidate(BaseModel):
@@ -137,6 +138,7 @@ class ScannerCandidate(BaseModel):
     structural_risk_reward: float
     chase_state: str
     reasons: list[str]
+    decision_intelligence: DecisionIntelligence | None = None
 
 
 class ScannerResponse(BaseModel):
@@ -234,12 +236,8 @@ def analysis_response(result: SymbolAnalysis) -> AnalysisResponse:
     signal_id = signal_fingerprint(symbol=result.instrument.symbol, setup_family=setup,
         direction=direction or "NONE", trigger=trigger,
         session=result.provider_timestamp or result.analysis_timestamp or datetime.min)
-    if result.data_state == MarketDataStatus.MARKET_CLOSED_LAST_SESSION.value:
-        next_action = "Watch for required confirmation next session; fresh live analysis must revalidate the setup."
-    elif not result.permission_to_trade:
-        next_action = "Wait for the existing confirmation requirements."
-    else:
-        next_action = "Decision is currently actionable; revalidate risk and chase state."
+    next_action = (result.decision_intelligence.recommended_action_label
+                   if result.decision_intelligence else "Decision details are unavailable.")
     return AnalysisResponse(symbol=result.instrument.symbol, engine_version=ENGINE_VERSION,
         parameter_version=PARAMETER_VERSION, setup_rules_version=SETUP_RULES_VERSION,
         signal_id=signal_id, provider_timestamp=result.provider_timestamp,
@@ -263,7 +261,8 @@ def analysis_response(result: SymbolAnalysis) -> AnalysisResponse:
         next_action=next_action, vwap_state=decision.vwap_state if decision else None,
         structure_5m=decision.structure_5m.value if decision else None,
         structure_15m=decision.structure_15m.value if decision else None,
-        important_levels=important, full_levels=levels)
+        important_levels=important, full_levels=levels,
+        decision_intelligence=result.decision_intelligence)
 
 
 def _candidate(candidate: MarketSetupCandidate) -> ScannerCandidate:
@@ -276,7 +275,7 @@ def _candidate(candidate: MarketSetupCandidate) -> ScannerCandidate:
         trigger=candidate.trigger, distance_to_trigger_pct=candidate.distance_to_trigger_pct,
         invalidation=candidate.invalidation, target_1=candidate.target_1, target_2=candidate.target_2,
         structural_risk_reward=candidate.risk_reward, chase_state=candidate.chase_status.value,
-        reasons=candidate.reasons)
+        reasons=candidate.reasons, decision_intelligence=candidate.decision_intelligence)
 
 
 def scanner_response(result: MarketScanResult) -> ScannerResponse:

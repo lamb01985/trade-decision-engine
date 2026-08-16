@@ -27,6 +27,13 @@ def test_canonical_analysis_contract_serializes_supported_fields():
         assert payload["parameter_version"] == PARAMETER_VERSION
         assert payload["setup_rules_version"] == SETUP_RULES_VERSION
         assert payload["market_status"]["data_status"] in {item.value for item in MarketDataStatus}
+        intelligence = payload["decision_intelligence"]
+        assert intelligence["recommended_action"] in {
+            "IGNORE", "MONITOR", "WAIT_FOR_CONFIRMATION", "READY", "INVALIDATED",
+            "EXPIRED", "DATA_UNAVAILABLE",
+        }
+        assert "confirmation_components" in intelligence
+        assert "next_state_requirements" in intelligence
         assert "instrument" not in payload and "standardized_decision" not in payload
     asyncio.run(scenario())
 

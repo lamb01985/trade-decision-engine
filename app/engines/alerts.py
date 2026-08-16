@@ -62,7 +62,7 @@ def candidate_from_analysis(result: SymbolAnalysis, policy: ScannerPolicy,
             chase_status=ChaseStatus.ACTIONABLE if confirmed else ChaseStatus.NOT_TRIGGERED,
             nearest_support=decision.nearest_support, nearest_resistance=decision.nearest_resistance,
             average_dollar_volume=adv, reasons=decision.reasoning + decision.missing_confirmation,
-            timestamp=now), None
+            timestamp=now, decision_intelligence=result.decision_intelligence), None
     if setup.state == SetupState.NO_TRADE or result.setup_score.score < policy.minimum_score:
         return None, "LOW_QUALITY"
     if any(x is None for x in (plan.trigger, plan.invalidation, plan.target_1, plan.target_2, plan.risk_reward)):

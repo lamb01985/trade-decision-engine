@@ -22,6 +22,7 @@ from app.universe import UniverseSelection
 from app.parameters import DEFAULT_PARAMETERS
 from app.signal_log import SignalLogger, SignalStore
 from app.persistence.contracts import ScannerStateStore
+from app.decision_intelligence import build_decision_intelligence
 
 logger = logging.getLogger(__name__)
 ET = ZoneInfo("America/New_York")
@@ -58,9 +59,10 @@ class AnalysisService:
     def _with_current_freshness(result: SymbolAnalysis, cached_at: float | None = None) -> SymbolAnalysis:
         status, session, age = classify_data(result.provider_timestamp)
         cache_age = max(0, int(monotonic() - cached_at)) if cached_at is not None else 0
+        data_state = market_data_state(status, session).value
         return result.model_copy(update={
             "data_status": status.value,
-            "data_state": market_data_state(status, session).value,
+            "data_state": data_state,
             "market_session": session.value,
             "data_age_seconds": age,
             "cache_hit": cached_at is not None,
@@ -70,6 +72,8 @@ class AnalysisService:
                 and result.decision.action_now in {ActionNow.LONG_TRIGGERED, ActionNow.SHORT_TRIGGERED}
                 and is_actionable_data(status, session)
             ),
+            "decision_intelligence": (build_decision_intelligence(result.decision, result.levels,
+                data_state=data_state, market_session=session.value) if result.decision else None),
         })
 
     async def analyze_symbol(self, symbol: str, include_cross_market: bool = True, force: bool = False,
@@ -139,6 +143,8 @@ class AnalysisService:
                 data_age_seconds=age, data_status=data_status.value, market_session=session.value,
                 data_state=market_data_state(data_status, session).value,
                 current_price=observation.price, price_source=observation.source)
+            result.decision_intelligence = build_decision_intelligence(decision, levels,
+                data_state=result.data_state, market_session=result.market_session)
             # Persistence/lifecycle state advances only from current regular-session data.
             # Premarket, after-hours, closed, stale, and unavailable observations remain
             # visible to callers but cannot manufacture a production state transition.
@@ -178,6 +184,7 @@ class AnalysisService:
                 action_now=result.decision.action_now if result.decision else None,
                 setup_progress=result.decision.setup_state if result.decision else None,
                 standardized_decision=result.decision,
+                decision_intelligence=result.decision_intelligence,
                 provider_timestamp=result.provider_timestamp, analysis_timestamp=result.analysis_timestamp,
                 data_age_seconds=result.data_age_seconds, data_status=result.data_status,
                 data_state=result.data_state,

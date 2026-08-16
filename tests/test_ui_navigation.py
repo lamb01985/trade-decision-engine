@@ -20,48 +20,40 @@ def open_target_source() -> str:
     return APP_JS[start : APP_JS.index("document.addEventListener('click'", start)]
 
 
-def test_action_card_maps_existing_backend_state_without_numeric_rules():
+def test_action_card_uses_normalized_decision_contract_without_numeric_rules():
     view = function_source("decisionView", "renderOpenedContext")
-    assert "x?.action_now" in view
-    assert "x?.setup_state" in view
-    assert "READY — ${direction}" in view
-    assert "TOO LATE — DO NOT CHASE" in view
-    assert "INVALIDATED" in view
-    assert "missing_confirmation" in view
+    assert "x?.decision_intelligence" in view
+    assert "recommended_action" in view
+    assert "recommended_action_label" in view
+    assert "x?.action_now" not in view and "x?.setup_state" not in view
     assert "minimum_" not in view and "threshold" not in view
 
 
-def test_ready_bucket_requires_confirmed_actionable_backend_state():
+def test_ready_bucket_requires_backend_authored_ready_action():
     bucket = function_source("scannerBucket", "scannerNext")
-    assert "effectiveStatus!=='LIVE'" in bucket
-    assert "['LONG_TRIGGERED','SHORT_TRIGGERED'].includes(action)" in bucket
-    assert "['CONFIRMED','LONG_CONFIRMED','SHORT_CONFIRMED'].includes(state)" in bucket
-    assert "chase==='ACTIONABLE'" in bucket
+    assert "action==='READY'" in bucket
+    assert "setup_progress" not in bucket and "chase_status" not in bucket
 
 
 def test_wait_bucket_is_the_fallback_for_forming_or_incomplete_setups():
     bucket = function_source("scannerBucket", "scannerNext")
-    assert "return confirmed?'ready':'watch'" in bucket
-    assert "Wait for required trigger and confirmation." in APP_JS
+    assert "['MONITOR','WAIT_FOR_CONFIRMATION'].includes(action)" in bucket
+    assert "recommended_action_label" in APP_JS
 
 
 def test_stale_too_late_and_invalidated_states_cannot_be_ready():
     bucket = function_source("scannerBucket", "scannerNext")
-    assert "effectiveStatus!=='LIVE'" in bucket
-    assert "'TOO_LATE','INVALIDATED','NO_SETUP','NO_TRADE'" in bucket
-    assert "'DO_NOT_CHASE','NO_TRADE'" in bucket
-    assert "'TOO_LATE','EXTENDED'" in bucket
+    assert "return'ignore'" in bucket
+    assert "setup_progress" not in bucket and "action_now" not in bucket
 
 
 def test_closed_market_uses_existing_ui_as_next_session_preparation():
     view = function_source("decisionView", "renderOpenedContext")
     buckets = function_source("renderScannerBuckets", "renderBest")
     render = function_source("renderAnalysis", "levelTitle")
-    assert "WATCH NEXT SESSION" in view
-    assert "TOO EXTENDED — REASSESS NEXT SESSION" in view
+    assert "recommended_action_label" in view
     assert "NEXT SESSION" in buckets and "WATCH" in buckets
     assert "priceLabel=isClosed?'LAST PRICE':'CURRENT PRICE'" in render
-    assert "Fresh live analysis must revalidate this plan" in view
     assert "PREP ONLY · NOT LIVE AUTHORIZATION" in APP_JS
 
 
@@ -107,31 +99,30 @@ def test_scanner_context_is_preserved_and_state_change_disclosed():
     assert "CURRENT:" in context
 
 
-def test_pretrade_check_uses_only_backend_decision_facts():
+def test_pretrade_check_uses_only_structured_decision_facts():
     check = function_source("renderTradeCheck", "renderAnalysis")
-    assert "missing_confirmation" in check
-    assert "isReadyDecision(x)" in check
-    assert "No confirmation-condition detail supplied by the backend" in check
+    assert "confirmation_components" in check
+    assert "item.state==='PASS'" in check
+    assert "Confirmation evidence unavailable" in check
     for inferred_check in ("structure_5m===", "every(value", "notExtended", "threshold", "score"):
         assert inferred_check not in check
 
 
 def test_overview_has_explicit_confirmed_and_failure_sections():
     render = function_source("renderAnalysis", "levelTitle")
-    assert "IF CONFIRMED" in render
+    assert "NEXT REQUIREMENTS" in render
     assert "IF IT FAILS" in render
-    assert "x?.do_not_trade_if" in render
-    for field in ("p.trigger", "p.invalidation", "p.target_1", "p.target_2"):
+    for field in ("di?.decision_zone", "di?.invalidation", "di?.targets", "di?.structural_risk_reward"):
         assert field in render
 
 
-def test_candidate_first_glance_contains_backend_price_trigger_and_invalidation():
+def test_candidate_first_glance_contains_contract_zone_and_invalidation():
     card = function_source("candidateCard", "bucketSection")
     assert "candidate.price" in card
-    assert "candidate.trigger" in card
-    assert "candidate.invalidation" in card
+    assert "di?.decision_zone?.lower_bound" in card
+    assert "di?.invalidation?.price" in card
     assert "candidate-primary-facts" in card
-    assert card.index("candidate.invalidation") < card.index("<details>")
+    assert card.index("di?.invalidation?.price") < card.index("<details>")
 
 
 def test_data_unavailable_is_distinct_from_no_trade():
@@ -202,17 +193,17 @@ def test_symbol_persists_across_overview_levels_and_options():
     assert "switchView('levels')" in APP_JS
 
 
-def test_full_levels_are_only_backend_levels_and_current_trade_plan_values():
+def test_full_levels_use_backend_authored_level_metadata():
     source = function_source("fullLevelItems", "itemLabel")
     assert "d.levels.filter" in source
-    assert "p.trigger" in source
-    assert "p.invalidation" in source
-    assert "p.target_1" in source
-    assert "p.target_2" in source
+    assert "d.decision_intelligence?.levels" in source
+    assert "meta?.categories" in source
+    for inferred in ("p.trigger", "p.invalidation", "p.target_1", "p.target_2"):
+        assert inferred not in source
     assert "items.push" in source
     assert "swing" not in source.lower()
-    assert "support" not in source.lower()
-    assert "resistance" not in source.lower()
+    assert "item.price<current" not in source
+    assert "item.price>current" not in source
 
 
 def test_overview_and_full_levels_share_exact_setup_values():
@@ -234,41 +225,41 @@ def test_ladder_is_high_to_low_and_current_price_is_backend_price():
 
 def test_setup_level_distances_are_arithmetic_from_backend_current_price():
     items = function_source("fullLevelItems", "itemLabel")
-    assert "distancePct:(price-current)/current*100" in items
+    assert "distancePct:(level.price-current)/current*100" in items
     assert "distancePct:(level.price-current)/current*100" in items
 
 
-def test_confluence_uses_backend_grouping_without_frontend_tolerance():
+def test_confluence_uses_engine_grouping_without_frontend_tolerance():
     render = function_source("renderFullLevels", "playbookCard")
     assert "d.levels.filter(level=>level.confluence>1)" in render
     assert "level.types" in render
     assert "level.confluence" in render
-    assert "Grouped by the backend levels engine" in render
+    assert "Grouped by the deterministic levels engine" in render
     assert "tolerance" not in render
     assert "threshold" not in render
 
 
 def test_level_actions_are_limited_to_supported_setup_semantics():
     consequence = function_source("levelConsequence", "showLevelDetail")
-    assert "setup-specific confirmation" in consequence
-    assert "mapped invalidation condition" in consequence
-    assert "first structural target" in consequence
-    assert "second structural target" in consequence
-    assert "does not assign this level a setup-specific action" in consequence
+    assert "required confirmation" in consequence
+    assert "invalidation?.human_label" in consequence
+    assert "first mapped structural target" in consequence
+    assert "second mapped structural target" in consequence
+    assert "structural context without a setup-specific action" in consequence
     assert "take profit" not in consequence.lower()
     assert "position size" not in consequence.lower()
 
 
 def run_level_action(item: dict, setup_state="WATCHING", action_now="WAIT", data_status="LIVE") -> dict:
-    ready = function_source("isReadyDecision", "ageLabel")
     context = function_source("levelDecisionContext", "levelAction")
     action = function_source("levelAction", "showLevelDetail")
+    recommended = {"CONFIRMED": "READY", "TOO_LATE": "EXPIRED",
+                   "INVALIDATED": "INVALIDATED"}.get(setup_state, "MONITOR")
     script = f"""
-{ready}
 {context}
 {action}
 const item={json.dumps(item)};
-const d={{data_status:{json.dumps(data_status)},current_price:100,instrument:{{timeframes:{{'1m':{{price:100}}}}}},decision:{{setup_state:{json.dumps(setup_state)},action_now:{json.dumps(action_now)}}}}};
+const d={{decision_intelligence:{{recommended_action:{json.dumps(recommended)},recommended_action_label:'Contract-authored action.',invalidation:{{condition:'Price trades below the mapped invalidation',human_label:'Invalidated below 99.00.'}}}}}};
 console.log(JSON.stringify(levelAction(item,d)));
 """
     result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
@@ -284,14 +275,14 @@ def test_level_detail_if_then_actions_are_conservative_and_type_specific():
     resistance = run_level_action({"price": 102, "types": ["15M_SWING_HIGH"], "setupLabels": []})
     session = run_level_action({"price": 100.5, "types": ["SESSION_VWAP"], "setupLabels": []})
     current = run_level_action({"price": 100, "types": ["CURRENT_PRICE"], "setupLabels": []})
-    assert trigger["result"] == "SETUP MAY BECOME ACTIONABLE"
-    assert "chase/extension" in trigger["detail"] and "Continue waiting" in trigger["detail"]
-    assert invalidation["result"] == "THESIS INVALID" and "Do not initiate" in invalidation["detail"]
+    assert trigger["result"] == "CHECK REQUIRED CONFIRMATION"
+    assert "touch alone" in trigger["detail"].lower()
+    assert invalidation["result"] == "THESIS INVALID" and "Invalidated below" in invalidation["detail"]
     assert target_1["result"] == "FIRST STRUCTURAL TARGET REACHED"
     assert target_2["result"] == "SECOND STRUCTURAL TARGET REACHED"
-    assert support["result"] == "WATCH FOR REACTION" and "not automatically an entry" in support["detail"]
-    assert resistance["result"] == "WATCH FOR REJECTION OR BREAKOUT" and "not automatically an entry or short" in resistance["detail"]
-    assert session["result"] == "RE-EVALUATE CURRENT SETUP STATE" and "not a generic session-level trade rule" in session["detail"]
+    assert support["result"] == "RE-EVALUATE CURRENT SETUP STATE"
+    assert resistance["result"] == "RE-EVALUATE CURRENT SETUP STATE"
+    assert session["result"] == "RE-EVALUATE CURRENT SETUP STATE"
     assert current["result"] == "NO ACTION FROM PRICE ALONE"
 
 
@@ -301,10 +292,9 @@ def test_level_action_respects_authoritative_decision_state():
     late = run_level_action(item, "TOO_LATE", "DO_NOT_CHASE")
     invalidated = run_level_action(item, "INVALIDATED", "NO_TRADE")
     closed = run_level_action(item, "CONFIRMED", "LONG_TRIGGERED", "MARKET_CLOSED")
-    assert ready["tone"] == "ready" and "currently actionable" in ready["detail"]
-    assert late["result"] == "DO NOT INITIATE THE SETUP" and "Do not chase" in late["detail"]
-    assert invalidated["result"] == "DO NOT INITIATE THE SETUP" and "No entry" in invalidated["detail"]
-    assert closed["tone"] == "wait" and "Fresh live analysis" in closed["detail"]
+    assert ready["tone"] == "ready" and "Contract-authored action" in ready["detail"]
+    assert late["tone"] == "stop"
+    assert invalidated["tone"] == "stop"
 
 
 def test_level_action_panel_is_visually_prominent_without_new_layout():
@@ -337,7 +327,7 @@ def test_current_price_is_first_class_in_hero_and_trade_plan():
     assert "provider_timestamp" in render
     assert "analysis_timestamp" in render
     assert "Trigger position alone does not confirm a trade." in render
-    assert "x?.action_now" in render
+    assert "di?.recommended_action" in render
 
 
 def test_long_distance_to_trigger_wording_is_directionally_correct():

@@ -61,6 +61,79 @@ class ActionNow(str, Enum):
     NO_TRADE = "NO_TRADE"
 
 
+class RecommendedAction(str, Enum):
+    IGNORE = "IGNORE"
+    MONITOR = "MONITOR"
+    WAIT_FOR_CONFIRMATION = "WAIT_FOR_CONFIRMATION"
+    READY = "READY"
+    MANAGE = "MANAGE"
+    INVALIDATED = "INVALIDATED"
+    EXPIRED = "EXPIRED"
+    DATA_UNAVAILABLE = "DATA_UNAVAILABLE"
+
+
+class ConfirmationComponentState(str, Enum):
+    PASS = "PASS"
+    PENDING = "PENDING"
+    UNAVAILABLE = "UNAVAILABLE"
+
+
+class ConfirmationComponent(BaseModel):
+    id: str
+    label: str
+    state: ConfirmationComponentState
+    required: bool = True
+    evidence: str | float | bool | None = None
+
+
+class NextStateRequirement(BaseModel):
+    id: str
+    label: str
+    state: ConfirmationComponentState
+    target_state: str
+
+
+class DecisionZone(BaseModel):
+    lower_bound: float
+    upper_bound: float
+    role: str
+    source: str
+    active: bool
+
+
+class InvalidationRule(BaseModel):
+    type: str
+    price: float | None = None
+    lower_bound: float | None = None
+    upper_bound: float | None = None
+    condition: str
+    timeframe: str | None = None
+    human_label: str
+
+
+class DecisionLevelMetadata(BaseModel):
+    price: float
+    categories: list[str]
+    setup_specific: bool
+    currently_interacting: bool
+    confluence_count: int
+    source_timeframes: list[str]
+    freshness_context: str
+
+
+class DecisionIntelligence(BaseModel):
+    recommended_action: RecommendedAction
+    recommended_action_label: str
+    lifecycle_state: str
+    confirmation_components: list[ConfirmationComponent] = Field(default_factory=list)
+    next_state_requirements: list[NextStateRequirement] = Field(default_factory=list)
+    decision_zone: DecisionZone | None = None
+    invalidation: InvalidationRule | None = None
+    targets: list[float] = Field(default_factory=list)
+    structural_risk_reward: float | None = None
+    levels: list[DecisionLevelMetadata] = Field(default_factory=list)
+
+
 class LevelImportance(str, Enum):
     MAJOR_RESISTANCE = "MAJOR_RESISTANCE"
     RESISTANCE = "RESISTANCE"
@@ -237,6 +310,7 @@ class SymbolAnalysis(BaseModel):
     futures_confirmation: str | None = None
     level_playbooks: list[LevelActionPlan] = Field(default_factory=list)
     decision: "StandardDecision | None" = None
+    decision_intelligence: DecisionIntelligence | None = None
     provider_timestamp: datetime | None = None
     analysis_timestamp: datetime | None = None
     decision_bar_timestamp: datetime | None = None
@@ -305,6 +379,7 @@ class ScannerRow(BaseModel):
     action_now: ActionNow | None = None
     setup_progress: SetupProgress | None = None
     standardized_decision: StandardDecision | None = None
+    decision_intelligence: DecisionIntelligence | None = None
     provider_timestamp: datetime | None = None
     analysis_timestamp: datetime | None = None
     data_age_seconds: int | None = None
@@ -348,6 +423,7 @@ class MarketSetupCandidate(BaseModel):
     average_dollar_volume: float | None = None
     reasons: list[str]
     timestamp: datetime
+    decision_intelligence: DecisionIntelligence | None = None
 
 
 class MarketAlert(BaseModel):
