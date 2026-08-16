@@ -101,6 +101,7 @@ class Settings:
     public_app_base_url: str | None = os.getenv("PUBLIC_APP_BASE_URL") or None
     notification_state_path: Path = Path(os.getenv("NOTIFICATION_STATE_PATH", "data/notifications.sqlite3"))
     cors_allowed_origins: tuple[str, ...] = _origins(os.getenv("CORS_ALLOWED_ORIGINS"))
+    cors_allowed_origin_regex: str | None = os.getenv("CORS_ALLOWED_ORIGIN_REGEX") or None
 
     @property
     def hosted(self) -> bool:

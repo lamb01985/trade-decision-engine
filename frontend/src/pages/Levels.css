@@ -1,0 +1,11 @@
+.levels-playbook{background:var(--panel);border:1px solid var(--line);padding:16px}
+.levels-playbook-head h3,.levels-reference-head h3{margin:4px 0 12px}
+.levels-playbook-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:5px}
+.levels-playbook-grid article{background:#08131c;border-left:2px solid var(--cyan);padding:14px}
+.levels-playbook-grid article.invalid{border-color:var(--red)}
+.levels-playbook-grid small,.levels-reference-head small{color:var(--cyan);font-weight:800;letter-spacing:.1em}
+.levels-playbook-grid .invalid small{color:var(--red)}
+.levels-playbook-grid strong,.levels-playbook-grid b{display:block;margin-top:7px}
+.levels-playbook-grid ul,.levels-playbook-grid p{margin:7px 0;color:var(--muted);font-size:12px}
+.levels-reference{margin-top:22px}
+@media(max-width:600px){.levels-playbook-grid{grid-template-columns:1fr}}

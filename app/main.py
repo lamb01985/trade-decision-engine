@@ -95,8 +95,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Trade Decision Engine", version="2.0.0", lifespan=lifespan)
-if settings.cors_allowed_origins:
+if settings.cors_allowed_origins or settings.cors_allowed_origin_regex:
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_allowed_origins),
+        allow_origin_regex=settings.cors_allowed_origin_regex,
         allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Content-Type"])
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
