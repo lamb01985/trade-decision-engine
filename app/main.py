@@ -23,8 +23,10 @@ from app.signal_log import NoOpSignalStore
 from app.persistence import create_stores
 from app.universe import UniverseSelection
 from app.api_contracts import (ApiErrorCode, ErrorDetail, ErrorResponse, HealthResponse,
-    NotificationStatus, OptionsPlan, ReadinessResponse, AnalysisResponse, ScannerResponse,
+    EvidenceArtifactResponse, NotificationStatus, OptionsPlan, ReadinessResponse, AnalysisResponse, ScannerResponse,
     analysis_response, options_plan_response, scanner_response)
+from app.evidence_analytics import (COHORT_KEYS, SLICE_KEYS, EvidenceAnalyticsError,
+                                    build_evidence_artifact)
 from app.background_scanner import HostedBackgroundScanner
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -196,6 +198,41 @@ async def hosted_scanner_status(request: Request) -> dict[str, object]:
         return {"enabled": False, "running": False, "notifications_enabled": settings.notifications_enabled,
                 "stale": False}
     return scanner.status()
+
+
+def _dimensions(value: str, allowed: tuple[str, ...], label: str) -> tuple[str, ...]:
+    dimensions = tuple(item.strip() for item in value.split(",") if item.strip())
+    unsupported = set(dimensions) - set(allowed)
+    if unsupported:
+        raise HTTPException(status_code=422, detail=f"Unsupported {label}: {sorted(unsupported)}")
+    return dimensions
+
+
+@app.get("/api/v1/research/evidence", response_model=EvidenceArtifactResponse)
+async def research_evidence(request: Request,
+                            cohort_by: str = "setup_family",
+                            slice_by: str = "",
+                            setup_family: str | None = None,
+                            direction: str | None = None,
+                            symbol: str | None = None,
+                            source_mode: str | None = None,
+                            reject_incompatible: bool = False) -> EvidenceArtifactResponse:
+    """Read-only Phase 4D evidence interface; it never enters scanner/trading paths."""
+    persistence = getattr(request.app.state, "persistence", None)
+    if persistence is None:
+        raise HTTPException(status_code=503, detail="Research persistence is unavailable")
+    filters = {key: value for key, value in {
+        "setup_family": setup_family, "direction": direction,
+        "symbol": symbol.upper() if symbol else None,
+        "source_mode": source_mode.upper() if source_mode else None}.items() if value is not None}
+    try:
+        artifact = build_evidence_artifact(persistence.research,
+            cohort_keys=_dimensions(cohort_by, COHORT_KEYS, "cohort dimension"),
+            slice_keys=_dimensions(slice_by, SLICE_KEYS, "slice dimension"),
+            filters=filters, reject_incompatible=reject_incompatible)
+    except EvidenceAnalyticsError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return EvidenceArtifactResponse(**artifact)
 
 
 @app.get("/api/analysis")

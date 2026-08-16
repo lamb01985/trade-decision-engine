@@ -204,6 +204,21 @@ class ReadinessResponse(BaseModel):
     capabilities: dict[str, bool] = Field(default_factory=dict)
 
 
+class EvidenceArtifactResponse(BaseModel):
+    schema_version: str
+    analytics_contract_version: str
+    slice_contract_version: str
+    sample_policy_version: str
+    realized_r_policy_version: str
+    cohort_definition: list[str]
+    slice_definition: list[str]
+    filters: dict[str, str]
+    generation_input_fingerprint: str
+    artifact_fingerprint: str
+    selection_errors: list[str]
+    aggregates: list[dict]
+
+
 def _market_status(data_status: str, session: str, provider_timestamp: datetime | None,
                    analysis_timestamp: datetime | None, age: int | None,
                    actionable: bool = False) -> MarketStatus:
