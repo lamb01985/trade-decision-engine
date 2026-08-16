@@ -1,0 +1,2 @@
+import { StatusPanel } from '../components/StatusPanel';
+export function Futures(){return <><header className="page-head"><div><small>FUTURES COMPATIBILITY</small><h2>NQ data probe</h2><p>Provider data only. No setup, trade plan, alert, or execution logic.</p></div></header><StatusPanel title="No futures request made">The React foundation preserves the isolated data-only extension point.</StatusPanel></>}

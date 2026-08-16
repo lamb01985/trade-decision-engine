@@ -1,0 +1,1 @@
+import { analysisFixture, scannerFixture } from '../api/fixtures';export const analysis={...analysisFixture,market_status:{...analysisFixture.market_status,data_status:'LIVE_CURRENT' as const,session:'REGULAR' as const,actionable:true}};export {scannerFixture};
