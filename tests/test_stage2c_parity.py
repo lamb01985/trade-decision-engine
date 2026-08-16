@@ -19,6 +19,12 @@ POSTGRES_URL = os.getenv("TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(not POSTGRES_URL, reason="TEST_DATABASE_URL is not configured")
 
 
+def unique_symbol(prefix: str) -> str:
+    """Keep persistent integration-test keys isolated across repeated suite runs."""
+    prefix = prefix.upper()[:4]
+    return f"{prefix}{uuid.uuid4().hex[:10-len(prefix)]}".upper()
+
+
 def representative_decision(symbol="PARITY"):
     analysis = asyncio.run(AnalysisService(FakeProvider(), signal_logger=NoOpSignalStore()).analyze_symbol(symbol))
     decision = analysis.decision
@@ -79,7 +85,7 @@ def workflow(stores, initial):
 
 
 def test_sqlite_and_postgres_have_identical_business_semantics(tmp_path):
-    decision = representative_decision()
+    decision = representative_decision(unique_symbol("PAR"))
     sqlite = create_stores(f"sqlite:///{tmp_path / 'parity.sqlite3'}", initialize=True)
     postgres = create_stores(POSTGRES_URL)
     assert workflow(sqlite, decision) == workflow(postgres, decision)
@@ -87,7 +93,7 @@ def test_sqlite_and_postgres_have_identical_business_semantics(tmp_path):
 
 def test_competing_lifecycle_updates_keep_newest_state():
     repository = create_stores(POSTGRES_URL).signal
-    initial = representative_decision("LIFECYCLE")
+    initial = representative_decision(unique_symbol("LIFE"))
     fingerprint = repository.record_decision(initial,
         parameter_snapshot=DEFAULT_PARAMETERS.as_dict(), evidence={"levels": []})
     older_at = initial.timestamp + timedelta(minutes=5)
@@ -106,7 +112,7 @@ def test_competing_lifecycle_updates_keep_newest_state():
 
 def test_record_decision_rolls_back_all_writes_when_outcome_insert_fails():
     repository = create_stores(POSTGRES_URL).signal
-    decision = representative_decision("ROLLBACK")
+    decision = representative_decision(unique_symbol("ROLL"))
     fingerprint = signal_fingerprint(symbol=decision.symbol,
         setup_family=decision.setup_family.value, direction=decision.direction,
         trigger=decision.trigger, session=decision.timestamp,
