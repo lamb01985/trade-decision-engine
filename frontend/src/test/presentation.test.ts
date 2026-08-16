@@ -1,0 +1,2 @@
+import { presentSetupState } from '../domain/presentation';
+test.each([['CONFIRMED',true,'READY'],['TRIGGERED',true,'READY'],['READY',false,'WAIT'],['CONFIRMED',false,'WAIT'],['FORMING',true,'WAIT'],['INVALID',true,'INVALID'],['PASS',true,'PASS'],['MONITOR',true,'MONITOR'],[null,true,'MONITOR']] as const)('maps raw %s with actionable=%s to %s without changing backend data',(raw,actionable,expected)=>expect(presentSetupState(raw,actionable)).toBe(expected));
