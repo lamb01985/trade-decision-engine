@@ -40,6 +40,8 @@ dist/
 # Provider caches and generated research/backtest output
 data/historical_cache/
 data/provider_cache/
+data/replay/
+data/replay_cache/
 data/backtest_reports/
 data/backtest_*.json
 data/backtest_*.md

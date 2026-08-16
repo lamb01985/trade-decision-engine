@@ -107,11 +107,13 @@ def detect_candidates(instrument: InstrumentAnalysis, levels: list[PriceLevel], 
     aligned_short = f5.trend == f15.trend == Trend.BEARISH
     if orh is not None and aligned_long:
         candidates.append(_break_candidate(SetupFamily.OPENING_RANGE_BREAKOUT, "LONG", orh, five, atr, rvol, parameters,
-            anchor_type="OPENING_RANGE_HIGH", anchor={"price": orh, "role": "OPENING_RANGE_HIGH",
+            anchor_type="OPENING_RANGE_HIGH", anchor={"price": instrument.opening_range_high,
+                "role": "OPENING_RANGE_HIGH",
                 "opening_range_minutes": parameters.opening_range_minutes}))
     if orl is not None and aligned_short:
         candidates.append(_break_candidate(SetupFamily.OPENING_RANGE_BREAKDOWN, "SHORT", orl, five, atr, rvol, parameters,
-            anchor_type="OPENING_RANGE_LOW", anchor={"price": orl, "role": "OPENING_RANGE_LOW",
+            anchor_type="OPENING_RANGE_LOW", anchor={"price": instrument.opening_range_low,
+                "role": "OPENING_RANGE_LOW",
                 "opening_range_minutes": parameters.opening_range_minutes}))
     resistance_level = min((x for x in levels if x.price >= latest.close and "CURRENT_PRICE" not in x.types),
         key=lambda item: item.price, default=None)

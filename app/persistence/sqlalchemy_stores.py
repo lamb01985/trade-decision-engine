@@ -458,7 +458,13 @@ class SQLAlchemyResearchLedger(SQLAlchemyStore):
         }
 
     def observe_candidates(self, analysis: SymbolAnalysis, candidates,
-                           parameters: EngineParameters, *, cycle_id: str | None = None) -> list[str]:
+                           parameters: EngineParameters, *, cycle_id: str | None = None,
+                           source_mode: str = "LIVE",
+                           replay_run_id: str | None = None) -> list[str]:
+        if source_mode not in {"LIVE", "REPLAY"}:
+            raise ValueError("Research source_mode must be LIVE or REPLAY")
+        if source_mode == "REPLAY" and not replay_run_id:
+            raise ValueError("Replay observations require replay_run_id")
         decision_bar = analysis.decision_bar_timestamp or analysis.instrument.as_of
         observed_at = analysis.analysis_timestamp or utcnow()
         if decision_bar is None:
@@ -548,7 +554,8 @@ class SQLAlchemyResearchLedger(SQLAlchemyStore):
                     "market_session": analysis.market_session, "provider_timestamp": (
                         analysis.provider_timestamp.isoformat() if analysis.provider_timestamp else None),
                     "analysis_timestamp": observed_at.isoformat(), "data_age_seconds": analysis.data_age_seconds,
-                    "decision_bar_timestamp": decision_bar.isoformat(), "missing_fields": []}
+                    "decision_bar_timestamp": decision_bar.isoformat(), "missing_fields": [],
+                    "source_mode": source_mode, "replay_run_id": replay_run_id}
                 semantic_payload = {"state": state.value, "action": _recommended_action(state),
                     "trigger": candidate.trigger, "invalidation": invalidation,
                     "target_1": plan.target_1 if plan else None, "target_2": plan.target_2 if plan else None,
@@ -598,7 +605,8 @@ class SQLAlchemyResearchLedger(SQLAlchemyStore):
                     feature_manifest={"available": ["symbol_context", "levels", "score_factors",
                         "candidate_state", "candidate_anchor"],
                         "unavailable": ["synchronized_indexes", "vix", "nq", "sector", "breadth"],
-                        "not_applicable": ["options_gex"], "candidate_anchor": anchor_payload},
+                        "not_applicable": ["options_gex"], "candidate_anchor": anchor_payload,
+                        "source_mode": source_mode, "replay_run_id": replay_run_id},
                     parameter_snapshot=parameter_snapshot, engine_version=ENGINE_VERSION,
                     setup_rules_version=SETUP_RULES_VERSION, parameter_version=PARAMETER_VERSION,
                     parameter_snapshot_hash=parameter_hash,
@@ -625,9 +633,11 @@ class SQLAlchemyResearchLedger(SQLAlchemyStore):
                   if key not in {"observation_id", "observation_fingerprint", "semantic_fingerprint",
                                  "event_type", "closure_reason", "observed_at", "market_timestamp",
                                  "cycle_id", "created_at"}}
+        replay = (source.get("data_quality") or {}).get("source_mode") == "REPLAY"
+        observed_at = market_timestamp + timedelta(minutes=1) if replay else utcnow()
         values.update(observation_id=str(uuid.uuid4()), cycle_id=cycle_id,
             observation_fingerprint=fingerprint, semantic_fingerprint=semantic,
-            event_type=event_type, closure_reason=closure_reason, observed_at=utcnow(),
+            event_type=event_type, closure_reason=closure_reason, observed_at=observed_at,
             market_timestamp=market_timestamp, created_at=utcnow())
         if data_state is not None:
             quality = dict(values["data_quality"])
@@ -681,6 +691,17 @@ class SQLAlchemyResearchLedger(SQLAlchemyStore):
                 self._append_derived_event(connection, latest, event_type="DATA_UNAVAILABLE",
                     market_timestamp=observed_at, closure_reason=None,
                     data_state=data_state, cycle_id=cycle_id)
+
+    def close_session(self, session_date: date, *, market_timestamp: datetime) -> None:
+        """Close remaining intraday research episodes at the deterministic RTH boundary."""
+        with self.engine.begin() as connection:
+            rows = connection.execute(select(setup_instances).where(
+                setup_instances.c.session_date == session_date)).mappings()
+            for instance in rows:
+                latest = self._latest_observation(connection, instance["setup_instance_id"])
+                if latest is not None and latest["closure_reason"] not in TERMINAL_CLOSURES:
+                    self._append_derived_event(connection, latest, event_type="CLOSURE",
+                        market_timestamp=market_timestamp, closure_reason="SESSION_ENDED")
 
     def record_scan_cycle(self, coverage: ScanCycleCoverage) -> None:
         expected = tuple(sorted({symbol.upper() for symbol in coverage.expected_symbols}))

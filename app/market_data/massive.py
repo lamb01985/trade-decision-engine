@@ -1,7 +1,7 @@
 import logging
 import re
 from datetime import date, datetime, timezone
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import httpx
 
@@ -68,19 +68,53 @@ class MassiveMarketDataProvider(MarketDataProvider):
             raise MarketDataError(payload.get("error") or payload.get("message") or "Massive API error")
         return payload
 
+    async def _get_paginated_payload(self, path: str,
+                                     params: dict[str, str | int | bool]) -> dict:
+        """Follow provider next_url deterministically and reject ambiguous truncation."""
+        results: list[dict] = []
+        seen_urls: set[str] = set()
+        page_path, page_params = path, dict(params)
+        for _ in range(10_000):
+            payload = await self._get_payload(page_path, page_params)
+            page = payload.get("results", [])
+            if not isinstance(page, list):
+                raise MarketDataError("Massive aggregate results are malformed")
+            results.extend(page)
+            next_url = payload.get("next_url")
+            if not next_url:
+                # The documented cap is 50,000 base aggregates. A full page
+                # without a continuation cannot prove that the range ended.
+                if len(page) >= 50_000:
+                    raise MarketDataError("Massive aggregate range may be truncated at 50000 results")
+                return {**payload, "results": results, "resultsCount": len(results)}
+            if not isinstance(next_url, str) or next_url in seen_urls:
+                raise MarketDataError("Massive aggregate pagination is invalid or cyclic")
+            seen_urls.add(next_url)
+            parsed = urlsplit(next_url)
+            if parsed.hostname and parsed.hostname not in {self._client.base_url.host}:
+                raise MarketDataError("Massive aggregate pagination changed provider host")
+            page_path = parsed.path
+            page_params = {key: value for key, value in parse_qsl(parsed.query)
+                           if key.lower() != "apikey"}
+        raise MarketDataError("Massive aggregate pagination exceeded the safety page limit")
+
     async def get_minute_bars(self, symbol: str, start: date, end: date) -> list[Bar]:
         path = f"/v2/aggs/ticker/{symbol}/range/1/minute/{start.isoformat()}/{end.isoformat()}"
-        payload = await self._get_payload(path, {"adjusted": "true", "sort": "asc", "limit": 50000})
+        payload = await self._get_paginated_payload(
+            path, {"adjusted": "true", "sort": "asc", "limit": 50000})
         results = payload.get("results", [])
         if not results:
             raise MarketDataError(f"No market data returned for {symbol}")
-        return [
+        bars = [
             Bar(
                 timestamp=datetime.fromtimestamp(item["t"] / 1000, tz=timezone.utc),
                 open=item["o"], high=item["h"], low=item["l"], close=item["c"], volume=item["v"],
             )
             for item in results
         ]
+        if any(left.timestamp >= right.timestamp for left, right in zip(bars, bars[1:])):
+            raise MarketDataError("Massive aggregate pages are not strictly chronological")
+        return bars
 
     async def resolve_active_futures_contract(self, product_code: str, as_of: date) -> dict:
         """Resolve a dated active contract; a root such as NQ is not an aggregate ticker."""

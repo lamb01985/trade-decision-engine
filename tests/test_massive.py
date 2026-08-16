@@ -57,6 +57,57 @@ def test_aggregate_request_construction_preserves_params_and_query_authenticatio
     }
 
 
+def test_aggregate_pagination_follows_next_url_without_reusing_embedded_key():
+    async def scenario():
+        provider = MassiveMarketDataProvider("known-test-key")
+        calls = []
+        pages = iter([
+            {"status": "OK", "results": [{"t": 1, "o": 1, "h": 1, "l": 1, "c": 1, "v": 1}],
+             "next_url": "https://api.massive.com/v2/page?cursor=abc&apiKey=leaked-old-key"},
+            {"status": "OK", "results": [{"t": 2, "o": 2, "h": 2, "l": 2, "c": 2, "v": 2}]},
+        ])
+        async def fake(path, params):
+            calls.append((path, dict(params)))
+            return next(pages)
+        provider._get_payload = fake
+        payload = await provider._get_paginated_payload("/v2/start", {"limit": 50000})
+        await provider.close()
+        return calls, payload
+    calls, payload = asyncio.run(scenario())
+    assert calls == [("/v2/start", {"limit": 50000}),
+                     ("/v2/page", {"cursor": "abc"})]
+    assert [item["t"] for item in payload["results"]] == [1, 2]
+
+
+def test_aggregate_full_page_without_next_url_is_rejected_as_possible_truncation():
+    async def scenario():
+        provider = MassiveMarketDataProvider("known-test-key")
+        async def fake(path, params):
+            return {"status": "OK", "results": [{}] * 50_000}
+        provider._get_payload = fake
+        try:
+            with pytest.raises(MarketDataError, match="truncated"):
+                await provider._get_paginated_payload("/v2/start", {"limit": 50000})
+        finally:
+            await provider.close()
+    asyncio.run(scenario())
+
+
+def test_aggregate_pagination_rejects_foreign_host():
+    async def foreign():
+        provider = MassiveMarketDataProvider("known-test-key")
+        async def fake(path, params):
+            return {"status": "OK", "results": [],
+                    "next_url": "https://example.com/steal?cursor=x"}
+        provider._get_payload = fake
+        try:
+            with pytest.raises(MarketDataError, match="host"):
+                await provider._get_paginated_payload("/v2/start", {})
+        finally:
+            await provider.close()
+    asyncio.run(foreign())
+
+
 def test_http_status_error_logs_safe_bounded_diagnostics(caplog):
     secret = "secret-test-key"
     body = f'{{"error":"denied", "apiKey":"{secret}", "detail":"' + ("x" * 400) + '"}'

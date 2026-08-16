@@ -73,6 +73,32 @@ def test_orb_and_compression_confirmation_require_acceptance():
     assert any(x.family == SetupFamily.COMPRESSION_BREAK and x.state == SetupProgress.CONFIRMED for x in found)
 
 
+def test_opening_range_identity_uses_raw_boundary_without_changing_merged_trigger():
+    sequence = [(100.7,101.2,100.6,101.1),(101.1,101.3,101.05,101.2),
+                (101.15,101.4,101.02,101.3)]
+    raw_boundary = 100.75
+    merged_trigger = 101.0
+    inst = instrument(101.3).model_copy(update={"opening_range_high": raw_boundary})
+    candidate = families(inst, [mapped(merged_trigger, "OPENING_RANGE_HIGH")], sequence)[
+        SetupFamily.OPENING_RANGE_BREAKOUT]
+    assert candidate.trigger == merged_trigger
+    assert candidate.anchor == {"price": raw_boundary, "role": "OPENING_RANGE_HIGH",
+                                "opening_range_minutes": 30}
+
+
+def test_opening_range_low_identity_uses_raw_boundary_without_changing_merged_trigger():
+    sequence = [(99.3,99.4,98.8,98.9),(98.9,98.95,98.6,98.8),
+                (98.85,98.98,98.5,98.7)]
+    raw_boundary = 99.25
+    merged_trigger = 99.0
+    inst = instrument(98.7, Trend.BEARISH).model_copy(update={"opening_range_low": raw_boundary})
+    candidate = families(inst, [mapped(merged_trigger, "OPENING_RANGE_LOW")], sequence)[
+        SetupFamily.OPENING_RANGE_BREAKDOWN]
+    assert candidate.trigger == merged_trigger
+    assert candidate.anchor == {"price": raw_boundary, "role": "OPENING_RANGE_LOW",
+                                "opening_range_minutes": 30}
+
+
 def test_state_can_become_invalidated_or_too_late_and_targets_are_mapped():
     seq = [(100.7,101.2,100.6,101.1),(101.1,101.3,101.05,101.2),(101.15,101.4,101.02,101.3)]
     levels = [mapped(99,"SUPPORT"),mapped(101,"OPENING_RANGE_HIGH"),mapped(102,"SWING"),mapped(103,"TARGET")]

@@ -88,6 +88,38 @@ def test_repeated_polls_are_one_instance_and_only_meaningful_states_append(ledge
     assert [row["setup_state"] for row in observations] == ["FORMING", "TRIGGERED"]
 
 
+def test_opening_range_raw_anchor_survives_moving_merged_trigger_and_terminal_reforms(ledger):
+    def opening_candidate(trigger, at, state=SetupProgress.FORMING):
+        return CandidateEvidence(SetupFamily.OPENING_RANGE_BREAKOUT, "LONG", state,
+            trigger, ("existing opening-range rule",), ("5m acceptance/retest",),
+            "OPENING_RANGE_HIGH", {"price": 99.75, "role": "OPENING_RANGE_HIGH",
+                                   "opening_range_minutes": 30}, at)
+    def selected(at, trigger, state):
+        base = analysis(at, state)
+        decision = base.decision.model_copy(update={
+            "setup_family": SetupFamily.OPENING_RANGE_BREAKOUT,
+            "direction": "LONG", "trigger": trigger, "setup_state": state})
+        return base.model_copy(update={"decision": decision})
+
+    first = ledger.observe_candidates(selected(T0, 100.0, SetupProgress.FORMING),
+        [opening_candidate(100.0, T0)], DEFAULT_PARAMETERS)[0]
+    later = T0 + timedelta(minutes=5)
+    same = ledger.observe_candidates(selected(later, 100.2, SetupProgress.WATCHING),
+        [opening_candidate(100.2, later, SetupProgress.WATCHING)], DEFAULT_PARAMETERS)[0]
+    assert same == first
+    assert len(ledger.instances("TEST")) == 1
+
+    terminal_at = later + timedelta(minutes=5)
+    ledger.observe_candidates(selected(terminal_at, 100.2, SetupProgress.TOO_LATE),
+        [opening_candidate(100.2, terminal_at, SetupProgress.WATCHING)], DEFAULT_PARAMETERS)
+    reformed_at = terminal_at + timedelta(minutes=5)
+    reformed = ledger.observe_candidates(selected(reformed_at, 100.3, SetupProgress.FORMING),
+        [opening_candidate(100.3, reformed_at)], DEFAULT_PARAMETERS)[0]
+    assert reformed != first
+    assert len(ledger.instances("TEST")) == 2
+    assert ledger.observations(first)[-1]["closure_reason"] == "EXPIRED"
+
+
 def test_disappearance_grace_reappearance_and_terminal_closure(ledger):
     instance_id = ledger.observe_candidates(analysis(), [candidate()], DEFAULT_PARAMETERS)[0]
     session = date(2026, 8, 14)

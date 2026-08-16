@@ -611,3 +611,37 @@ deduplication, restart durability, coverage distinctions, disappearance grace,
 append-only outcomes, version retention, and timestamp no-lookahead checks all
 pass. AWS deployment, notification changes, frontend changes, new market-data
 sources, and trading-rule changes remain outside Phase 4A.2.
+
+## Phase 4A.3 production deployment and verification — ACCEPTED
+
+**Status: ACCEPTED on 2026-08-16.** This acceptance record preserves the
+operator-provided results of the prior Codex production-verification session so
+later phases can verify their deployment gate from the repository. Phase 4A.3
+deployed Git SHA `2fa4e12872ff89f35bbc12709d8ba4ee627aa328`, with `main` and
+`origin/main` synchronized, as ECS task definition
+`default-trade-decision-engine:14`. The rollout completed with desired/running/
+pending counts `1/1/0` and zero failed tasks.
+
+Production Alembic revision `20260816_03` completed successfully and
+transactionally. Verification found all five additive research tables:
+`setup_instances`, `setup_observations`, `setup_outcome_assessments`,
+`research_scan_cycles`, and `research_scan_symbol_coverage`. Existing
+production row counts were preserved exactly.
+
+Two independent automatic scanner cycles completed successfully. Each covered
+13 of 13 symbols with zero failures, producing exactly 26 cycle-symbol coverage
+rows with no duplicate cycle-symbol keys and no fabricated setup instances.
+Because verification occurred while the market was closed, coverage correctly
+recorded `NOT_OBSERVED` rather than `NO_SETUP`. Persistence survived ECS task
+replacement.
+
+Final operational checks reported `/api/health` healthy,
+`/api/readiness` with `ready=true`, PostgreSQL stores available,
+`scanner_ready=true`, and Massive configured. Notifications remained disabled
+and no sends occurred. The CloudWatch/log audit found no research-persistence,
+PostgreSQL, duplicate-key, migration, credential-leakage, or final-task
+readiness errors. Trading logic was explicitly confirmed unchanged.
+
+**Final verdict: PHASE 4A.3 ACCEPTED. Phase 4B is safe to begin.** This section
+documents completed verification only; it does not authorize another
+deployment, migration run, notification change, or production mutation.
