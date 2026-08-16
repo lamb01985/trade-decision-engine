@@ -2,7 +2,7 @@ import asyncio
 import logging
 import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from time import monotonic
 from zoneinfo import ZoneInfo
 
@@ -18,7 +18,7 @@ from app.config import settings
 from app.market_data.base import MarketDataProvider
 from app.market_data.base import MarketDataError, StockObservation
 from app.freshness import DataStatus, classify_data, is_actionable_data, market_data_state
-from app.models import ActionNow, DashboardAnalysis, MarketScanResult, ScannerRow, SetupState, SymbolAnalysis, Trend
+from app.models import ActionNow, Bar, DashboardAnalysis, MarketScanResult, ScannerRow, SetupState, SymbolAnalysis, Trend
 from app.universe import UniverseSelection
 from app.parameters import DEFAULT_PARAMETERS
 from app.signal_log import SignalLogger, SignalStore
@@ -40,6 +40,7 @@ class AnalysisService:
         self.provider = provider
         self.cache_seconds = cache_seconds
         self._cache: dict[str, tuple[float, SymbolAnalysis]] = {}
+        self._chart_cache: dict[tuple[str, date, date], tuple[float, list[Bar]]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._market_scan_lock = asyncio.Lock()
         self.scanner_state_store = scanner_state_store
@@ -58,6 +59,29 @@ class AnalysisService:
         if not SYMBOL_RE.fullmatch(normalized):
             raise ValueError("Ticker must contain 1-10 letters, numbers, dots, or hyphens")
         return normalized
+
+    def cached_analysis(self, symbol: str) -> SymbolAnalysis | None:
+        """Return existing analysis for read-only consumers without running the engine."""
+        normalized = self.normalize_symbol(symbol)
+        cached = self._cache.get(normalized)
+        return self._with_current_freshness(cached[1], cached[0]) if cached else None
+
+    async def chart_bars(self, symbol: str, start: date, end: date,
+                         cache_seconds: int = 15) -> list[Bar]:
+        """Use the shared provider with a short UI cache; never invoke analysis."""
+        normalized = self.normalize_symbol(symbol)
+        key = (normalized, start, end)
+        cached = self._chart_cache.get(key)
+        if cached and monotonic() - cached[0] < cache_seconds:
+            logger.info("chart_cache symbol=%s result=hit", normalized)
+            return cached[1]
+        logger.info("chart_cache symbol=%s result=miss", normalized)
+        bars = await self.provider.get_minute_bars(normalized, start, end)
+        if len(self._chart_cache) >= 128:
+            oldest = min(self._chart_cache, key=lambda item: self._chart_cache[item][0])
+            self._chart_cache.pop(oldest)
+        self._chart_cache[key] = (monotonic(), bars)
+        return bars
 
     @staticmethod
     def _with_current_freshness(result: SymbolAnalysis, cached_at: float | None = None) -> SymbolAnalysis:

@@ -1,4 +1,5 @@
 import logging
+from datetime import date, datetime, timedelta
 from time import monotonic
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -25,6 +26,7 @@ from app.universe import UniverseSelection
 from app.api_contracts import (ApiErrorCode, ErrorDetail, ErrorResponse, HealthResponse,
     EvidenceArtifactResponse, NotificationStatus, OptionsPlan, ReadinessResponse, AnalysisResponse, ScannerResponse,
     analysis_response, options_plan_response, scanner_response)
+from app.chart_snapshot import ET as CHART_ET, ChartSnapshot, ChartTimeframe, build_snapshot
 from app.evidence_analytics import (COHORT_KEYS, SLICE_KEYS, EvidenceAnalyticsError,
                                     build_evidence_artifact)
 from app.excursion_analytics import (COHORT_KEYS as EXCURSION_COHORT_KEYS,
@@ -438,6 +440,47 @@ async def analysis_v1(symbol: str, request: Request, refresh: bool = False) -> A
         body = ErrorResponse(error=ErrorDetail(code=ApiErrorCode.UNSUPPORTED_SYMBOL,
             message=str(exc)), detail=str(exc))
         raise HTTPException(status_code=400, detail=body.model_dump(mode="json")) from exc
+
+
+@app.get("/api/v1/chart/{symbol}", response_model=ChartSnapshot,
+         responses={400: {"model": ErrorResponse}, 404: {"model": ErrorResponse},
+                    502: {"model": ErrorResponse}})
+async def chart_snapshot(symbol: str, request: Request,
+                         timeframe: ChartTimeframe = ChartTimeframe.FIVE_MINUTES,
+                         lookback_sessions: int = Query(5, ge=1, le=60),
+                         start: date | None = None, end: date | None = None,
+                         extended_hours: bool = False) -> ChartSnapshot:
+    service = get_service(request)
+    try:
+        ticker = service.normalize_symbol(symbol)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if (start is None) != (end is None):
+        raise HTTPException(status_code=400, detail="start and end must be supplied together")
+    today = datetime.now(CHART_ET).date()
+    range_end = end or today
+    range_start = start or (range_end - timedelta(days=min(120, lookback_sessions * 2 + 7)))
+    if range_end < range_start or (range_end - range_start).days > 120:
+        raise HTTPException(status_code=400, detail="Chart date range must be ordered and at most 120 days")
+    provider = request.app.state.market_data_provider
+    if provider is None:
+        raise HTTPException(status_code=503, detail="MASSIVE_API_KEY is not configured")
+    try:
+        bars = await service.chart_bars(ticker, range_start, range_end)
+        snapshot = build_snapshot(ticker, timeframe, extended_hours, bars,
+                                  service.cached_analysis(ticker))
+        if start is None:
+            session_dates = sorted({item.timestamp.astimezone(CHART_ET).date() for item in snapshot.candles})
+            keep = set(session_dates[-lookback_sessions:])
+            snapshot.candles = [item for item in snapshot.candles
+                                if item.timestamp.astimezone(CHART_ET).date() in keep]
+        return snapshot
+    except MarketDataError as exc:
+        if "No market data" in str(exc):
+            raise HTTPException(status_code=404, detail=f"Chart data unavailable for {ticker}") from exc
+        raise
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/api/scanner")
