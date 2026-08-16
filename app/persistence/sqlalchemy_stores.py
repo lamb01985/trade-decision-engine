@@ -108,8 +108,8 @@ class SQLAlchemySignalStore(SQLAlchemyStore):
             current = connection.execute(select(signals).where(signals.c.fingerprint == fingerprint).with_for_update()).mappings().first()
             if current is None:
                 inserted = connection.execute(dialect_insert(signals).values(**values).on_conflict_do_nothing(
-                    index_elements=[signals.c.fingerprint]))
-                if inserted.rowcount == 0:
+                    index_elements=[signals.c.fingerprint]).returning(signals.c.id)).scalar_one_or_none()
+                if inserted is None:
                     current = connection.execute(select(signals).where(
                         signals.c.fingerprint == fingerprint).with_for_update()).mappings().one()
             accepted = current is None or decision.timestamp > aware(current["last_observed_at"])
