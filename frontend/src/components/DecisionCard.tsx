@@ -1,5 +1,5 @@
 import type { Analysis } from '../domain/types';
-import { friendlyState, presentSetupState } from '../domain/presentation';
+import { friendlyCondition, friendlyState, presentSetupState } from '../domain/presentation';
 
 const money=(n:number|null|undefined)=>n==null?'Unavailable':n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
 const unique=(values:string[])=>[...new Set(values.filter(Boolean))];
@@ -27,7 +27,7 @@ export function DecisionCard({analysis}:{analysis:Analysis}){
 
     <div className="decision-support">
       <section className="requirements" aria-labelledby="requirements-title"><div className="section-title"><div><small>NEXT</small><h3 id="requirements-title">What needs to happen</h3></div><span>{conditions.length} open</span></div>{conditions.length?<ul className="condition-list">{conditions.map(x=><li key={x}><span aria-hidden="true">○</span>{x}</li>)}</ul>:<p className="empty-copy">No open conditions reported by the backend.</p>}</section>
-      <section className="invalidation-panel" aria-labelledby="invalidation-title"><small>WHERE THE THESIS IS WRONG</small><h3 id="invalidation-title">{money(analysis.invalidation)}</h3>{analysis.what_changes_my_mind.length?<ul>{unique(analysis.what_changes_my_mind).map(x=><li key={x}>{x}</li>)}</ul>:<p>Explicit invalidation detail unavailable.</p>}</section>
+      <section className="invalidation-panel" aria-labelledby="invalidation-title"><small>WHERE THE THESIS IS WRONG</small><h3 id="invalidation-title">{money(analysis.invalidation)}</h3>{analysis.what_changes_my_mind.length?<ul>{unique(analysis.what_changes_my_mind).map(x=><li key={x}>{friendlyCondition(x)}</li>)}</ul>:<p>Explicit invalidation detail unavailable.</p>}</section>
     </div>
 
     <section className="evidence-rail" aria-labelledby="opportunity-title"><div><small>OPPORTUNITY / EVIDENCE</small><h3 id="opportunity-title">Does this deserve attention?</h3></div><div className="evidence-mini"><span><b>Evidence</b>{friendlyState(analysis.evidence_status)}</span><span><b>Sample</b>Unavailable</span><span><b>Median MFE / MAE</b>Unavailable</span><span><b>1R / 2R reach</b>Unavailable</span><span><b>Room to run</b>Unavailable</span></div><p>Population metrics are shown only when supplied by a compatible backend evidence contract.</p></section>

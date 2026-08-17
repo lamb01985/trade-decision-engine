@@ -11,3 +11,5 @@ export function presentSetupState(raw:string|null|undefined, actionable:boolean)
 }
 
 export const friendlyState=(value:string|null|undefined)=>(value||'Unavailable').replaceAll('_',' ');
+
+export const friendlyCondition=(value:string)=>value==='new mapped structure and a qualifying setup sequence'?'new qualifying structure and setup sequence':value;

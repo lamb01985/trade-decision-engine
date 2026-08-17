@@ -35,3 +35,10 @@ test('does not invent conditional copy when backend conditions are absent',async
   expect(screen.getByText('No watch condition is currently available.')).toBeVisible();
   expect(screen.getByText('No invalidation condition is currently available.')).toBeVisible();
 });
+
+test('shows trader-facing condition copy while preserving the response value',async()=>{
+  const raw='new mapped structure and a qualifying setup sequence';
+  renderLevels({...payload,what_changes_my_mind:[raw]});
+  expect(await screen.findByText('new qualifying structure and setup sequence')).toBeVisible();
+  expect(screen.queryByText(raw)).not.toBeInTheDocument();
+});
