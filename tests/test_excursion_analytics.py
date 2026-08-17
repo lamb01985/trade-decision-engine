@@ -24,7 +24,7 @@ class Ledger:
 
     def add(self, instance_id="one", *, direction="LONG", trigger=100.0, invalidation=99.0,
             family="BREAKOUT_RETEST", symbol="TEST", source_mode="REPLAY", rules="1.0.0",
-            outcome="TARGET_FIRST", ready_at=START):
+            outcome="TARGET_FIRST", ready_at=START, market_regime="TRENDING"):
         self._instances.append({"setup_instance_id": instance_id, "symbol": symbol,
             "setup_family": family, "direction": direction, "identity_schema_version": "setup-instance-v1",
             "occurrence_policy_version": "occurrence-v1", "engine_version": "2.0.0",
@@ -44,7 +44,7 @@ class Ledger:
                 "low_of_day": 97.0, "prior_day_high": 104.0, "prior_day_low": 96.0,
                 "opening_range_high": 102.5, "opening_range_low": 97.5,
                 "timeframes": {"5m": {"vwap": 99.5, "relative_volume": 1.5, "trend": "BULLISH"},
-                               "15m": {"trend": "BULLISH"}}}, "regime": {"trend": "TRENDING"}}}
+                               "15m": {"trend": "BULLISH"}}}, "regime": {"trend": market_regime}}}
         self._observations[instance_id] = [observation]
         self._outcomes[instance_id] = [{"outcome_assessment_id": f"out-{instance_id}",
             "reference_observation_id": observation["observation_id"], "primary_outcome": outcome}]
@@ -198,6 +198,36 @@ def test_cohort_slices_room_to_run_and_sample_labels():
     long = next(row for row in artifact["measurements"] if row["direction"] == "LONG")
     assert long["opportunity"]["structural_space_atr"] == 2
     assert long["slices"]["structural_space_atr"] == "GE_2_ATR"
+
+
+def test_market_regime_unavailable_sentinel_is_not_reported_available():
+    ledger = Ledger(); ledger.add(market_regime="UNAVAILABLE")
+    opportunity = measurement(ledger, bars([(101, 99.5, 100)] * 5))["opportunity"]
+    assert opportunity["market_regime"] == "UNAVAILABLE"
+    assert opportunity["availability"]["market_regime"] == "UNAVAILABLE"
+
+
+def test_populated_market_regime_is_reported_available():
+    ledger = Ledger(); ledger.add(market_regime="TRENDING")
+    opportunity = measurement(ledger, bars([(101, 99.5, 100)] * 5))["opportunity"]
+    assert opportunity["market_regime"] == "TRENDING"
+    assert opportunity["availability"]["market_regime"] == "AVAILABLE"
+
+
+def test_mixed_missing_regime_availability_preserves_other_opportunity_semantics():
+    ledger = Ledger()
+    ledger.add("populated", market_regime="RANGE")
+    ledger.add("sentinel", market_regime="UNAVAILABLE")
+    ledger.add("missing", market_regime=None)
+    evidence = bars([(101, 99.5, 100)] * 5)
+    rows = build_excursion_artifact(ledger, {"TEST": evidence}, horizons=(5,), cohort_keys=())["measurements"]
+    by_id = {row["setup_instance_id"]: row["opportunity"] for row in rows}
+    assert by_id["populated"]["availability"]["market_regime"] == "AVAILABLE"
+    assert by_id["sentinel"]["availability"]["market_regime"] == "UNAVAILABLE"
+    assert by_id["missing"]["availability"]["market_regime"] == "UNAVAILABLE"
+    for opportunity in by_id.values():
+        assert opportunity["availability"]["structural_space_atr"] == "AVAILABLE"
+        assert opportunity["structural_space_atr"] == 2
 
 
 def test_live_replay_and_version_compatibility_never_pool():

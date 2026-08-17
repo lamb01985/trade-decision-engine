@@ -11,7 +11,7 @@ notification, brokerage, or execution state.
 
 Contract identifiers are `excursion-artifact-v1`,
 `excursion-measurement-v1`, `minute-ohlc-path-v1`,
-`ready-opportunity-context-v1`, and `excursion-aggregation-v1`. Changing a
+`ready-opportunity-context-v2`, and `excursion-aggregation-v1`. Changing a
 measurement contract changes semantic fingerprints.
 
 ## Reference event, identity, and provenance

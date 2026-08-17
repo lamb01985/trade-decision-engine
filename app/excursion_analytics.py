@@ -26,7 +26,7 @@ UTC = timezone.utc
 SCHEMA_VERSION = "excursion-artifact-v1"
 MEASUREMENT_CONTRACT_VERSION = "excursion-measurement-v1"
 PATH_CONTRACT_VERSION = "minute-ohlc-path-v1"
-OPPORTUNITY_CONTRACT_VERSION = "ready-opportunity-context-v1"
+OPPORTUNITY_CONTRACT_VERSION = "ready-opportunity-context-v2"
 AGGREGATION_CONTRACT_VERSION = "excursion-aggregation-v1"
 HORIZONS = (5, 15, 30, 60, 120, "END_OF_SESSION")
 THRESHOLDS_R = (0.25, 0.5, 1.0, 1.5, 2.0, 3.0)
@@ -169,7 +169,8 @@ def _opportunity(observation: Mapping[str, Any], reference: float | None) -> dic
         "time_of_day_minutes": observation.get("minutes_since_regular_open"),
         "setup_family": observation.get("setup_family"), "direction": direction,
         "market_regime": (context.get("regime") or {}).get("trend", "UNAVAILABLE")}
-    raw["availability"] = {key: ("AVAILABLE" if value is not None else "UNAVAILABLE")
+    raw["availability"] = {key: ("AVAILABLE" if value is not None and value != "UNAVAILABLE"
+                                      else "UNAVAILABLE")
                            for key, value in raw.items() if key != "availability"}
     return raw
 
