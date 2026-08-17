@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query';import { api } from './client';
-export const useAnalysis=(symbol:string)=>useQuery({queryKey:['analysis',symbol],queryFn:()=>api.analysis(symbol)});
-export const useScanner=(symbols:string[])=>useQuery({queryKey:['scanner',symbols],queryFn:()=>api.scanner(symbols)});
+import { useMutation,useQuery,useQueryClient } from '@tanstack/react-query';import { api } from './client';
+export const useAnalysis=(symbol:string)=>{const client=useQueryClient();const query=useQuery({queryKey:['analysis',symbol],queryFn:()=>api.analysis(symbol)});const refresh=useMutation({mutationFn:()=>api.analysis(symbol,true),onSuccess:data=>{client.setQueryData(['analysis',symbol],data);client.invalidateQueries({queryKey:['chart',symbol]})}});return{...query,reanalyze:refresh.mutateAsync,isReanalyzing:refresh.isPending,refreshError:refresh.error}};
+export const useScanner=(symbols:string[])=>{const client=useQueryClient();const key=['scanner',symbols] as const;const query=useQuery({queryKey:key,queryFn:()=>api.scanner(symbols)});const refresh=useMutation({mutationFn:()=>api.scanner(symbols,true),onSuccess:data=>client.setQueryData(key,data)});return{...query,rescan:refresh.mutateAsync,isRescanning:refresh.isPending,refreshError:refresh.error}};
 export const useEvidence=()=>useQuery({queryKey:['evidence'],queryFn:api.evidence});
 export const useChart=(symbol:string,timeframe:'1m'|'5m'|'15m'|'1h'|'1d',extendedHours:boolean)=>useQuery({queryKey:['chart',symbol,timeframe,extendedHours],queryFn:()=>api.chart(symbol,timeframe,extendedHours)});
