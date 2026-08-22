@@ -31,6 +31,12 @@ def bars(last_three, base=100.0):
             for i, (o, h, l, c) in enumerate(values)]
 
 
+def completed_bars(values):
+    start = datetime(2026, 8, 14, 13, 34, tzinfo=timezone.utc)
+    return [Bar(timestamp=start+timedelta(minutes=i*5), open=o, high=h, low=l, close=c, volume=5000)
+            for i, (o, h, l, c) in enumerate(values)]
+
+
 def families(inst, levels, sequence):
     return {x.family: x for x in detect_candidates(inst, levels, bars(sequence))}
 
@@ -115,3 +121,59 @@ def test_ambiguous_or_missing_conditions_return_no_trade():
     neutral = instrument(100, Trend.NEUTRAL)
     decision = build_standard_decision(neutral, [mapped(99,"SUPPORT"),mapped(101,"RESISTANCE")], bars([(100,100.1,99.9,100)]*3), 90)
     assert decision.setup_state == SetupProgress.NO_SETUP and decision.action_now == ActionNow.NO_TRADE
+
+
+def test_non_compression_families_are_detected_before_eight_completed_bars():
+    sequence = completed_bars([
+        (99.8, 99.9, 99.6, 99.7),
+        (99.9, 100.3, 99.8, 100.2),
+        (100.1, 100.4, 100.02, 100.3),
+    ])
+    found = {item.family: item for item in detect_candidates(
+        instrument(100.3), [mapped(100, "SESSION_VWAP")], sequence)}
+    assert found[SetupFamily.VWAP_RECLAIM].state == SetupProgress.CONFIRMED
+    assert SetupFamily.COMPRESSION_BREAK not in found
+
+
+def test_compression_waits_for_its_own_full_historical_window():
+    compact = [(100, 100.08, 99.95, 100)] * 5 + [
+        (100, 100.4, 100, 100.3), (100.25, 100.5, 100.05, 100.4)]
+    before = detect_candidates(instrument(100.4), [], completed_bars(compact))
+    assert all(item.family != SetupFamily.COMPRESSION_BREAK for item in before)
+    complete = [(100, 100.08, 99.95, 100)] * 6 + compact[-2:]
+    after = detect_candidates(instrument(100.4), [], completed_bars(complete))
+    assert any(item.family == SetupFamily.COMPRESSION_BREAK for item in after)
+
+
+def test_nvda_audited_reclaim_sequences_are_not_suppressed_by_compression_history():
+    reclaim = completed_bars([
+        (99, 99.1, 98.7, 98.8),
+        (98.9, 99.3, 98.8, 99.2),
+        (99.1, 99.4, 98.95, 99.3),
+    ])
+    found = {item.family: item for item in detect_candidates(
+        instrument(99.3), [mapped(99, "SWING")], reclaim)}
+    assert found[SetupFamily.FAILED_BREAKDOWN].state == SetupProgress.CONFIRMED
+
+
+def test_aapl_audited_failed_breakout_is_not_suppressed_by_compression_history():
+    failure = completed_bars([
+        (101, 101.3, 100.9, 101.2),
+        (101.1, 101.2, 100.7, 100.8),
+        (100.9, 101.05, 100.6, 100.7),
+    ])
+    found = {item.family: item for item in detect_candidates(
+        instrument(100.7), [mapped(101, "SWING")], failure)}
+    assert found[SetupFamily.FAILED_BREAKOUT].state == SetupProgress.CONFIRMED
+
+
+def test_existing_volume_confirmation_threshold_is_unchanged_before_eight_bars():
+    reclaim = completed_bars([
+        (99.8, 99.9, 99.6, 99.7),
+        (99.9, 100.3, 99.8, 100.2),
+        (100.1, 100.4, 100.02, 100.3),
+    ])
+    found = {item.family: item for item in detect_candidates(
+        instrument(100.3, rvol=1.19), [mapped(100, "SESSION_VWAP")], reclaim)}
+    assert found[SetupFamily.VWAP_RECLAIM].state == SetupProgress.TRIGGERED
+    assert found[SetupFamily.VWAP_RECLAIM].missing == ("VWAP hold/retest", "relative-volume confirmation")

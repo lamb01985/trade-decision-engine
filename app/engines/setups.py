@@ -92,16 +92,23 @@ def detect_candidates(instrument: InstrumentAnalysis, levels: list[PriceLevel], 
                       parameters: EngineParameters = DEFAULT_PARAMETERS) -> list[CandidateEvidence]:
     five = completed_five_minute_bars(bars)
     atr = instrument.atr_5m or 0
-    if len(five) < max(4, parameters.compression_lookback_bars+2) or atr <= 0:
+    # ATR is universal because every family uses ATR-scaled tolerances. Bar
+    # history is not universal: gate each family only where its own indexing
+    # and deterministic sequence require it.
+    if atr <= 0:
         return []
-    prior2, previous, latest = five[-3], five[-2], five[-1]
+    candidates: list[CandidateEvidence] = []
+    # Opening-range and mapped-level break candidates consume two completed
+    # bars (previous/latest) and can legitimately emit FORMING or WATCHING.
+    if len(five) < 2:
+        return candidates
+    previous, latest = five[-2], five[-1]
     f5, f15 = instrument.timeframes["5m"], instrument.timeframes["15m"]
     rvol = f5.relative_volume
     volume_ok = rvol is not None and rvol >= parameters.volume_confirmation_rvol
     tolerance = atr*parameters.retest_tolerance_atr
     vwap_tolerance = atr*parameters.vwap_tolerance_atr
     buffer = atr*parameters.breakout_buffer_atr
-    candidates: list[CandidateEvidence] = []
     orh, orl, vwap = (_mapped(levels, x) for x in ("OPENING_RANGE_HIGH", "OPENING_RANGE_LOW", "SESSION_VWAP"))
     aligned_long = f5.trend == f15.trend == Trend.BULLISH
     aligned_short = f5.trend == f15.trend == Trend.BEARISH
@@ -125,6 +132,12 @@ def detect_candidates(instrument: InstrumentAnalysis, levels: list[PriceLevel], 
     if support_level is not None and aligned_short:
         candidates.append(_break_candidate(SetupFamily.BREAKDOWN_RETEST, "SHORT", support_level.price, five, atr, rvol, parameters,
             anchor_type="MAPPED_SUPPORT", anchor=_level_anchor(support_level)))
+    # VWAP, failed-break, pullback, and momentum sequences consume the latest
+    # three completed bars. Insufficient history for them must not discard the
+    # independent two-bar candidates above.
+    if len(five) < 3:
+        return candidates
+    prior2 = five[-3]
     if vwap is not None:
         reclaimed = prior2.close < vwap and previous.close > vwap+buffer and latest.low <= vwap+vwap_tolerance and latest.close > vwap+buffer
         crossed_up = previous.close < vwap and latest.close > vwap+buffer
@@ -175,18 +188,21 @@ def detect_candidates(instrument: InstrumentAnalysis, levels: list[PriceLevel], 
             "MOMENTUM_PAUSE_BAR", {"pause_bar_at": previous.timestamp.isoformat(), "pause_high": previous.high,
                 "pause_low": previous.low, "breakout_buffer_atr": parameters.breakout_buffer_atr},
                 qualifying_bar_at=latest.timestamp))
-    compression = five[-parameters.compression_lookback_bars-2:-2]
-    comp_high, comp_low = max(x.high for x in compression), min(x.low for x in compression)
-    if comp_high-comp_low <= atr*parameters.compression_range_atr:
-        compression_anchor = {"window_start_at": compression[0].timestamp.isoformat(),
-            "window_end_at": compression[-1].timestamp.isoformat(), "range_high": comp_high,
-            "range_low": comp_low, "acceptance_bar_times": _bar_times(previous, latest)}
-        if previous.close > comp_high+buffer and latest.low <= comp_high+tolerance and latest.close > comp_high:
-            candidates.append(CandidateEvidence(SetupFamily.COMPRESSION_BREAK, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, comp_high, (SETUP_RULES[SetupFamily.COMPRESSION_BREAK],), () if volume_ok else ("relative-volume confirmation",),
-                "COMPRESSION_WINDOW", compression_anchor, qualifying_bar_at=latest.timestamp))
-        elif previous.close < comp_low-buffer and latest.high >= comp_low-tolerance and latest.close < comp_low:
-            candidates.append(CandidateEvidence(SetupFamily.COMPRESSION_BREAK, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, comp_low, (SETUP_RULES[SetupFamily.COMPRESSION_BREAK],), () if volume_ok else ("relative-volume confirmation",),
-                "COMPRESSION_WINDOW", compression_anchor, qualifying_bar_at=latest.timestamp))
+    # Compression alone needs its full historical window plus the two
+    # acceptance bars excluded from that window.
+    if len(five) >= parameters.compression_lookback_bars + 2:
+        compression = five[-parameters.compression_lookback_bars-2:-2]
+        comp_high, comp_low = max(x.high for x in compression), min(x.low for x in compression)
+        if comp_high-comp_low <= atr*parameters.compression_range_atr:
+            compression_anchor = {"window_start_at": compression[0].timestamp.isoformat(),
+                "window_end_at": compression[-1].timestamp.isoformat(), "range_high": comp_high,
+                "range_low": comp_low, "acceptance_bar_times": _bar_times(previous, latest)}
+            if previous.close > comp_high+buffer and latest.low <= comp_high+tolerance and latest.close > comp_high:
+                candidates.append(CandidateEvidence(SetupFamily.COMPRESSION_BREAK, "LONG", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, comp_high, (SETUP_RULES[SetupFamily.COMPRESSION_BREAK],), () if volume_ok else ("relative-volume confirmation",),
+                    "COMPRESSION_WINDOW", compression_anchor, qualifying_bar_at=latest.timestamp))
+            elif previous.close < comp_low-buffer and latest.high >= comp_low-tolerance and latest.close < comp_low:
+                candidates.append(CandidateEvidence(SetupFamily.COMPRESSION_BREAK, "SHORT", SetupProgress.CONFIRMED if volume_ok else SetupProgress.TRIGGERED, comp_low, (SETUP_RULES[SetupFamily.COMPRESSION_BREAK],), () if volume_ok else ("relative-volume confirmation",),
+                    "COMPRESSION_WINDOW", compression_anchor, qualifying_bar_at=latest.timestamp))
     return candidates
 
 

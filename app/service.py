@@ -17,7 +17,8 @@ from app.engines.alerts import AlertEngine, ScannerPolicy, candidate_from_analys
 from app.config import settings
 from app.market_data.base import MarketDataProvider
 from app.market_data.base import MarketDataError, StockObservation
-from app.freshness import DataStatus, classify_data, is_actionable_data, market_data_state
+from app.freshness import (LIVE_MAX_AGE_SECONDS, DataStatus, classify_data,
+                           is_actionable_data, market_data_state, market_session)
 from app.models import ActionNow, Bar, DashboardAnalysis, MarketScanResult, ScannerRow, SetupState, SymbolAnalysis, Trend
 from app.universe import UniverseSelection
 from app.parameters import DEFAULT_PARAMETERS
@@ -259,7 +260,8 @@ class AnalysisService:
         symbols = list(dict.fromkeys(symbols))[:settings.scanner_max_symbols]
         research_cycle_id = (str(uuid.uuid4()) if durable_transitions_only
                              and self.research_ledger is not None else None)
-        logger.info("scanner_start symbols_attempted=%d forced=%s", len(symbols), force)
+        logger.info("scanner_start requested_symbols=%s symbols_attempted=%d forced=%s",
+                    symbols, len(symbols), force)
         analyses: list[SymbolAnalysis] = []
         failed_symbols: list[str] = []
         # Small sequential batches avoid an API burst while still keeping market-wide scans practical.
@@ -282,21 +284,57 @@ class AnalysisService:
         effective_policy = policy or self.alert_engine.policy
         engine = self._alert_engines.setdefault(effective_policy, AlertEngine(effective_policy,
             state_store=self.scanner_state_store))
-        timestamps = [
-            analysis.provider_timestamp or analysis.instrument.as_of
-            for analysis in analyses
-            if analysis.provider_timestamp is not None or analysis.instrument.as_of is not None
-        ]
-        provider_timestamp = min(timestamps) if timestamps else None
-        data_status, session, age = classify_data(provider_timestamp)
-        if failed_symbols:
-            data_status = DataStatus.ERROR
-        if data_status == DataStatus.LIVE and session.value == "REGULAR" and not failed_symbols:
-            candidates, alerts, filtered = engine.evaluate(analyses)
-        elif data_status == DataStatus.MARKET_CLOSED and not failed_symbols:
+        freshness_checked_at = datetime.now(timezone.utc)
+        session = market_session(freshness_checked_at)
+        fresh_analyses: list[SymbolAnalysis] = []
+        closed_analyses: list[SymbolAnalysis] = []
+        for analysis in analyses:
+            timestamp = analysis.provider_timestamp or analysis.instrument.as_of
+            normalized_timestamp = (timestamp if timestamp is None or timestamp.tzinfo
+                                    else timestamp.replace(tzinfo=timezone.utc))
+            symbol_status, symbol_session, symbol_age = classify_data(timestamp, freshness_checked_at)
+            rejection = None
+            if timestamp is None:
+                rejection = "MISSING_PROVIDER_TIMESTAMP"
+            elif symbol_status != DataStatus.LIVE and symbol_status != DataStatus.MARKET_CLOSED:
+                rejection = f"DATA_{symbol_status.value}"
+            elif symbol_status == DataStatus.LIVE and symbol_session.value != "REGULAR":
+                rejection = f"SESSION_{symbol_session.value}"
+            if symbol_status == DataStatus.LIVE and symbol_session.value == "REGULAR":
+                fresh_analyses.append(analysis)
+            elif symbol_status == DataStatus.MARKET_CLOSED:
+                closed_analyses.append(analysis)
+            logger.info(
+                "scanner_freshness symbol=%s raw_provider_timestamp=%r "
+                "normalized_provider_timestamp=%s data_age_seconds=%s freshness_threshold_seconds=%d "
+                "session=%s source=%s endpoints=minute_aggregates+stock_snapshot rejection_reason=%s",
+                analysis.instrument.symbol, analysis.provider_timestamp,
+                normalized_timestamp.astimezone(timezone.utc).isoformat()
+                if normalized_timestamp else None,
+                symbol_age, LIVE_MAX_AGE_SECONDS, symbol_session.value,
+                analysis.price_source, rejection,
+            )
+
+        evaluation_analyses = fresh_analyses or closed_analyses
+        evaluation_timestamps = [item.provider_timestamp or item.instrument.as_of
+                                 for item in evaluation_analyses]
+        all_timestamps = [item.provider_timestamp or item.instrument.as_of for item in analyses
+                          if item.provider_timestamp is not None or item.instrument.as_of is not None]
+        # A usable partial scan reports freshness for the symbols actually evaluated.
+        # If none qualify, retain the rejected observation timestamp so stale and
+        # unavailable remain distinguishable from a provider failure.
+        provider_timestamp = (min(evaluation_timestamps) if evaluation_timestamps
+                              else min(all_timestamps) if all_timestamps else None)
+        data_status, session, age = classify_data(provider_timestamp, freshness_checked_at)
+        if not analyses:
+            data_status = DataStatus.ERROR if failed_symbols else DataStatus.UNAVAILABLE
+        if data_status == DataStatus.LIVE and session.value == "REGULAR":
+            candidates, alerts, filtered = engine.evaluate(evaluation_analyses)
+        elif data_status == DataStatus.MARKET_CLOSED:
             # Closed-market preparation is a read-only ranking of the latest
             # completed session. Do not advance live alert-transition state.
-            evaluated = [candidate_from_analysis(item, effective_policy, allow_closed=True) for item in analyses]
+            evaluated = [candidate_from_analysis(item, effective_policy, allow_closed=True)
+                         for item in evaluation_analyses]
             candidates = [candidate for candidate, _ in evaluated if candidate is not None]
             candidates.sort(key=lambda item: (
                 item.status in {SetupState.LONG_CONFIRMED, SetupState.SHORT_CONFIRMED},
@@ -308,16 +346,25 @@ class AnalysisService:
             candidates, alerts, filtered = [], [], 0
         analysis_timestamp = datetime.now(timezone.utc)
         duration = round(monotonic() - scan_started, 3)
-        logger.info("scanner_end symbols_attempted=%d successful=%d skipped=%d candidates=%d status=%s age_seconds=%s duration_seconds=%.3f",
-                    len(symbols), len(analyses), len(failed_symbols), len(candidates),
-                    data_status.value, age, duration)
+        logger.info("scanner_end symbols_attempted=%d successful_symbols=%s failed_symbols=%s "
+                    "setup_evaluation_count=%d candidates=%d status=%s age_seconds=%s "
+                    "freshness_threshold_seconds=%d session=%s duration_seconds=%.3f",
+                    len(symbols), [item.instrument.symbol for item in analyses], failed_symbols,
+                    len(evaluation_analyses), len(candidates),
+                    data_status.value, age, LIVE_MAX_AGE_SECONDS, session.value, duration)
         result = MarketScanResult(universe_size=len(symbols), analyzed=len(analyses), filtered_illiquid=filtered,
             candidates=candidates, alerts=alerts, data_as_of=provider_timestamp,
             provider_timestamp=provider_timestamp, analysis_timestamp=analysis_timestamp,
             data_age_seconds=age, data_status=data_status.value, market_session=session.value,
             data_state=market_data_state(data_status, session).value,
             scan_duration_seconds=duration, failed_symbols=failed_symbols,
-            message=None if candidates else ("MARKET CLOSED — historical analysis only." if data_status == DataStatus.MARKET_CLOSED else "NO HIGH-QUALITY SETUPS RIGHT NOW."),
+            message=(None if candidates else
+                     "MARKET CLOSED — historical analysis only."
+                     if data_status == DataStatus.MARKET_CLOSED else
+                     "SCANNER DATA UNAVAILABLE — no opportunity conclusion."
+                     if data_status in {DataStatus.ERROR, DataStatus.UNAVAILABLE,
+                                        DataStatus.DELAYED, DataStatus.STALE} else
+                     "NO HIGH-QUALITY SETUPS RIGHT NOW."),
             next_refresh_seconds=settings.scanner_refresh_seconds)
         if research_cycle_id is not None and self.research_ledger is not None:
             by_symbol = {item.instrument.symbol: item for item in analyses}

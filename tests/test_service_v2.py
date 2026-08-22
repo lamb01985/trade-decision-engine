@@ -38,7 +38,7 @@ def test_permission_to_trade_follows_standardized_decision_action():
 
 
 
-def test_market_scan_reports_data_freshness(monkeypatch):
+def test_market_scan_reports_freshness_for_evaluated_symbols(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     from app.universe import UniverseSelection
@@ -56,10 +56,8 @@ def test_market_scan_reports_data_freshness(monkeypatch):
         monkeypatch.setattr(service, "analyze_symbol", fake_analyze)
         result = await service.market_scan(UniverseSelection(watchlist=("NVDA", "AMD")))
 
-        assert result.data_as_of == stale.instrument.as_of
-        assert result.data_age_seconds is not None and result.data_age_seconds >= 600
-        # Closed-session classification takes precedence over wall-clock age;
-        # old Friday data on Saturday is historical, not a failed live feed.
-        assert result.data_status == "MARKET_CLOSED"
+        assert result.data_as_of == (fresh.provider_timestamp or fresh.instrument.as_of)
+        assert result.data_age_seconds is not None and result.data_age_seconds <= 90
+        assert result.data_status == "LIVE"
 
     asyncio.run(scenario())

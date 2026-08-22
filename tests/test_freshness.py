@@ -129,7 +129,7 @@ def test_stale_underlying_vetoes_options_before_contract_evaluation():
     assert "STALE" in eligibility.reasons[0]
 
 
-def test_market_scan_forces_provider_revalidation_and_partial_failure_is_error(monkeypatch):
+def test_market_scan_forces_provider_revalidation_and_partial_failure_keeps_valid_symbols(monkeypatch):
     async def scenario():
         service = AnalysisService(object())
         calls = []
@@ -145,12 +145,79 @@ def test_market_scan_forces_provider_revalidation_and_partial_failure_is_error(m
             return sample.model_copy(update={"instrument": sample.instrument.model_copy(update={"symbol": symbol})})
 
         monkeypatch.setattr(service, "analyze_symbol", fake_analyze)
-        monkeypatch.setattr("app.service.classify_data", lambda _: (DataStatus.LIVE, MarketSession.REGULAR, 1))
+        monkeypatch.setattr("app.service.classify_data", lambda *_: (DataStatus.LIVE, MarketSession.REGULAR, 1))
         result = await service.market_scan(UniverseSelection(watchlist=("QQQ", "FAIL")))
         assert sorted(calls) == [("FAIL", True), ("QQQ", True)]
-        assert result.data_status == "ERROR"
+        assert result.data_status == "LIVE"
         assert result.failed_symbols == ["FAIL"]
-        assert result.candidates == [] and result.alerts == []
+        assert result.analyzed == 1
+
+    asyncio.run(scenario())
+
+
+def test_scanner_and_single_symbol_use_identical_freshness_for_same_timestamp(monkeypatch):
+    async def scenario():
+        service = AnalysisService(object())
+        timestamp = datetime(2026, 8, 17, 15, 0, tzinfo=timezone.utc)
+        sample = analysis("NVDA").model_copy(update={
+            "provider_timestamp": timestamp, "data_status": "LIVE", "market_session": "REGULAR",
+        })
+
+        async def fake_analyze(symbol, include_cross_market=False, force=False):
+            return sample
+
+        monkeypatch.setattr(service, "analyze_symbol", fake_analyze)
+        monkeypatch.setattr("app.service.datetime", type("FrozenDateTime", (datetime,), {
+            "now": classmethod(lambda cls, tz=None: datetime(2026, 8, 17, 15, 0, 30, tzinfo=timezone.utc))
+        }))
+        single_status, single_session, single_age = classify_data(
+            timestamp, datetime(2026, 8, 17, 15, 0, 30, tzinfo=timezone.utc))
+        scan = await service.market_scan(UniverseSelection(watchlist=("NVDA",)))
+        assert (scan.data_status, scan.market_session, scan.data_age_seconds) == (
+            single_status.value, single_session.value, single_age)
+
+    asyncio.run(scenario())
+
+
+def test_one_stale_symbol_does_not_invalidate_fresh_symbol(monkeypatch):
+    async def scenario():
+        service = AnalysisService(object())
+        now = datetime(2026, 8, 17, 15, 0, 30, tzinfo=timezone.utc)
+        fresh = analysis("NVDA").model_copy(update={"provider_timestamp": now - timedelta(seconds=30)})
+        stale = analysis("OLD").model_copy(update={"provider_timestamp": now - timedelta(seconds=301)})
+
+        async def fake_analyze(symbol, include_cross_market=False, force=False):
+            return fresh if symbol == "NVDA" else stale
+
+        monkeypatch.setattr(service, "analyze_symbol", fake_analyze)
+        monkeypatch.setattr("app.service.datetime", type("FrozenDateTime", (datetime,), {
+            "now": classmethod(lambda cls, tz=None: now)
+        }))
+        result = await service.market_scan(UniverseSelection(watchlist=("NVDA", "OLD")))
+        assert result.data_status == "LIVE"
+        assert result.provider_timestamp == fresh.provider_timestamp
+        assert result.analyzed == 2
+
+    asyncio.run(scenario())
+
+
+def test_all_stale_symbols_fail_freshness_instead_of_becoming_zero_setup(monkeypatch):
+    async def scenario():
+        service = AnalysisService(object())
+        now = datetime(2026, 8, 17, 15, 0, 30, tzinfo=timezone.utc)
+        stale = analysis("NVDA").model_copy(update={"provider_timestamp": now - timedelta(seconds=301)})
+
+        async def fake_analyze(symbol, include_cross_market=False, force=False):
+            return stale
+
+        monkeypatch.setattr(service, "analyze_symbol", fake_analyze)
+        monkeypatch.setattr("app.service.datetime", type("FrozenDateTime", (datetime,), {
+            "now": classmethod(lambda cls, tz=None: now)
+        }))
+        result = await service.market_scan(UniverseSelection(watchlist=("NVDA",)))
+        assert result.data_status == "STALE"
+        assert result.data_state == "LIVE_STALE"
+        assert result.candidates == []
 
     asyncio.run(scenario())
 
@@ -169,7 +236,7 @@ def test_closed_market_scan_returns_ranked_preparation_candidates_without_alerts
             return sample
 
         monkeypatch.setattr(service, "analyze_symbol", fake_analyze)
-        monkeypatch.setattr("app.service.classify_data", lambda _: (DataStatus.MARKET_CLOSED, MarketSession.CLOSED, 60_000))
+        monkeypatch.setattr("app.service.classify_data", lambda *_: (DataStatus.MARKET_CLOSED, MarketSession.CLOSED, 60_000))
         result = await service.market_scan(UniverseSelection(watchlist=("QQQ",)))
         assert result.data_status == "MARKET_CLOSED"
         assert [item.symbol for item in result.candidates] == ["QQQ"]

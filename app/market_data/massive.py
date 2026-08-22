@@ -185,7 +185,16 @@ class MassiveMarketDataProvider(MarketDataProvider):
         minute_time = self._snapshot_timestamp(minute.get("t"))
         if isinstance(minute.get("c"), (int, float)) and minute_time:
             observations.append(StockObservation(ticker, float(minute["c"]), minute_time, "MASSIVE_MINUTE_SNAPSHOT"))
-        return max(observations, key=lambda item: item.provider_timestamp) if observations else None
+        observation = max(observations, key=lambda item: item.provider_timestamp) if observations else None
+        logger.info(
+            "market_freshness_provider symbol=%s endpoint=stock_snapshot "
+            "raw_trade_timestamp=%r raw_quote_timestamp=%r raw_minute_timestamp=%r "
+            "normalized_timestamp=%s source=%s",
+            ticker, trade.get("t"), quote.get("t"), minute.get("t"),
+            observation.provider_timestamp.isoformat() if observation else None,
+            observation.source if observation else None,
+        )
+        return observation
 
     async def get_active_option_contracts(self, underlying_symbol: str, as_of: date) -> list[dict]:
         """Return listed, unexpired option contract metadata for expiration discovery."""
