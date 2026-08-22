@@ -89,6 +89,13 @@ async def lifespan(app: FastAPI):
         await app.state.background_scanner.stop()
     if provider:
         await provider.close()
+    # Only the local SignalLogger (no database_url, not hosted) owns a raw
+    # sqlite3 connection that needs closing here. When persistence is
+    # configured, app.state.persistence.signal.close() below already covers
+    # it; NoOpSignalStore holds no connection and has no close() to call.
+    if (app.state.service and app.state.persistence is None
+            and app.state.service.signal_logger.persistent):
+        app.state.service.signal_logger.close()
     await app.state.notification_service.close()
     if app.state.persistence:
         app.state.persistence.signal.close()

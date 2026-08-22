@@ -26,10 +26,18 @@ class SignalLogger:
         self.persistent = True
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        # A single persistent connection, reused for the life of this logger.
+        # check_same_thread=False is defensive, not a concurrency requirement:
+        # every caller in this codebase reaches SignalLogger cooperatively on
+        # the asyncio event loop thread, never in parallel.
+        self._db = sqlite3.connect(str(self.path), check_same_thread=False)
         self._initialize()
 
-    def _connect(self):
-        return sqlite3.connect(self.path)
+    def _connect(self) -> sqlite3.Connection:
+        return self._db
+
+    def close(self) -> None:
+        self._db.close()
 
     def _initialize(self) -> None:
         with self._connect() as db:

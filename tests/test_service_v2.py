@@ -61,3 +61,66 @@ def test_market_scan_reports_freshness_for_evaluated_symbols(monkeypatch):
         assert result.data_status == "LIVE"
 
     asyncio.run(scenario())
+
+
+def test_market_scan_partial_symbol_failure_does_not_invalidate_scan(monkeypatch):
+    # BUG 1 regression: one symbol erroring out of a batch (timeout, rate limit,
+    # transient provider error) must not poison results from symbols that
+    # succeeded with live data. Only exclude and log the failed symbol.
+    import app.freshness as freshness_module
+    import app.service as service_module
+    from app.freshness import MarketSession
+    from app.universe import UniverseSelection
+    from tests.test_alerts import analysis
+
+    async def scenario():
+        # Freshness classification depends on the real-world market session
+        # (regular hours vs. weekend/overnight close). Pin it to REGULAR so
+        # this test's outcome doesn't depend on when it happens to run.
+        monkeypatch.setattr(freshness_module, "market_session", lambda now=None: MarketSession.REGULAR)
+        monkeypatch.setattr(service_module, "market_session", lambda now=None: MarketSession.REGULAR)
+
+        service = AnalysisService(FakeProvider())
+        nvda = analysis("NVDA")
+        amd = analysis("AMD")
+
+        async def fake_analyze(symbol, include_cross_market=False, force=False):
+            if symbol == "TSLA":
+                raise TimeoutError("provider timeout")
+            return {"NVDA": nvda, "AMD": amd}[symbol]
+
+        monkeypatch.setattr(service, "analyze_symbol", fake_analyze)
+        result = await service.market_scan(UniverseSelection(watchlist=("NVDA", "AMD", "TSLA")))
+
+        assert result.failed_symbols == ["TSLA"]
+        assert result.analyzed == 2
+        assert result.data_status == "LIVE"
+        assert result.data_state == "LIVE_CURRENT"
+        assert result.message is None or "UNAVAILABLE" not in result.message
+
+    asyncio.run(scenario())
+
+
+def test_market_scan_all_symbols_failing_reports_full_error(monkeypatch):
+    # Counterpart to the above: when every symbol in the batch fails, there is
+    # no live data to fall back on, so the scan should report a hard error
+    # rather than a silently empty "no setups" result.
+    from app.universe import UniverseSelection
+
+    async def scenario():
+        service = AnalysisService(FakeProvider())
+
+        async def fake_analyze(symbol, include_cross_market=False, force=False):
+            raise TimeoutError("provider timeout")
+
+        monkeypatch.setattr(service, "analyze_symbol", fake_analyze)
+        result = await service.market_scan(UniverseSelection(watchlist=("NVDA", "AMD")))
+
+        assert set(result.failed_symbols) == {"NVDA", "AMD"}
+        assert result.analyzed == 0
+        assert result.candidates == []
+        assert result.data_status == "ERROR"
+        assert result.data_state == "DATA_ERROR"
+        assert result.message is not None and "UNAVAILABLE" in result.message
+
+    asyncio.run(scenario())
