@@ -32,6 +32,7 @@ from app.evidence_analytics import (COHORT_KEYS, SLICE_KEYS, EvidenceAnalyticsEr
 from app.excursion_analytics import (COHORT_KEYS as EXCURSION_COHORT_KEYS,
     SLICE_KEYS as EXCURSION_SLICE_KEYS, ExcursionAnalyticsError, build_excursion_artifact)
 from app.background_scanner import HostedBackgroundScanner
+from app.versioning import build_identity
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # Never log provider URLs containing API credentials.
@@ -41,6 +42,9 @@ STATIC = Path(__file__).parent / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    build = build_identity()
+    logger.info("startup_build revision=%s ref=%s built_at=%s source=%s",
+                build["revision"], build["ref"], build["built_at"], build["source"])
     log_configuration_metadata(settings.massive_api_key, settings.massive_base_url)
     app.state.persistence = None
     if settings.database_url:
@@ -93,9 +97,9 @@ async def lifespan(app: FastAPI):
     # sqlite3 connection that needs closing here. When persistence is
     # configured, app.state.persistence.signal.close() below already covers
     # it; NoOpSignalStore holds no connection and has no close() to call.
-    if (app.state.service and app.state.persistence is None
-            and app.state.service.signal_logger.persistent):
-        app.state.service.signal_logger.close()
+    signal_logger = getattr(app.state.service, "signal_logger", None)
+    if app.state.persistence is None and signal_logger is not None and signal_logger.persistent:
+        signal_logger.close()
     await app.state.notification_service.close()
     if app.state.persistence:
         app.state.persistence.signal.close()
@@ -159,7 +163,7 @@ async def dashboard() -> FileResponse:
 async def health() -> dict:
     return {"status": "ok", "market_data_configured": bool(settings.massive_api_key),
             "notifications_configured": bool(settings.pushover_user_key and settings.pushover_app_token),
-            "execution_enabled": False, **_capabilities()}
+            "execution_enabled": False, "build": build_identity(), **_capabilities()}
 
 
 def _capabilities() -> dict[str, bool]:

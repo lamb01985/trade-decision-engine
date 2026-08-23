@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 from app.models import (DecisionIntelligence, MarketScanResult, MarketSetupCandidate, OptionsPlanResult,
                         PriceLevel, SymbolAnalysis)
 from app.signal_identity import signal_fingerprint
-from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
+from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION, build_identity
 
 
 class MarketDataStatus(str, Enum):
@@ -188,9 +188,18 @@ class NotificationStatus(BaseModel):
     priorities: dict[str, int]
 
 
+class BuildInfo(BaseModel):
+    """Which commit this process is running. Logic versions do not answer that."""
+    revision: str
+    ref: str
+    built_at: str
+    source: str
+
+
 class HealthResponse(BaseModel):
     app: str = "ok"
     engine_version: str = ENGINE_VERSION
+    build: BuildInfo = Field(default_factory=lambda: BuildInfo(**build_identity()))
     capabilities: dict[str, bool] = Field(default_factory=dict)
 
 

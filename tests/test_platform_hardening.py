@@ -12,7 +12,7 @@ from app.market_data.base import (FuturesDataProvider, MarketDataError,
 from app.models import StandardDecision
 from app.service import AnalysisService
 from app.signal_identity import signal_fingerprint
-from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
+from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION, build_identity
 from tests.test_service_v2 import FakeProvider
 
 
@@ -68,6 +68,30 @@ def test_health_and_readiness_never_expose_secrets():
     assert readiness.status_code == 200
     serialized = str(readiness.json()).lower()
     assert "api_key" not in serialized and "token" not in serialized and "user_key" not in serialized
+
+
+def test_health_reports_the_build_identity_of_the_running_process():
+    with TestClient(app) as client:
+        versioned = client.get("/api/v1/health").json()
+        legacy = client.get("/health").json()
+    for build in (versioned["build"], legacy["build"]):
+        assert set(build) == {"revision", "ref", "built_at", "source"}
+        assert build["revision"] and build["source"] in {"image", "git", "unknown"}
+    assert versioned["build"] == legacy["build"]
+    # Logic versions must not stand in for build identity; they move independently.
+    assert versioned["engine_version"] == ENGINE_VERSION
+
+
+def test_build_identity_prefers_image_environment_over_local_git(monkeypatch):
+    build_identity.cache_clear()
+    monkeypatch.setenv("GIT_SHA", "0123456789abcdef0123456789abcdef01234567")
+    monkeypatch.setenv("GIT_REF", "main")
+    monkeypatch.setenv("BUILD_TIME", "2026-08-22T00:00:00Z")
+    try:
+        assert build_identity() == {"revision": "0123456789ab", "ref": "main",
+                                    "built_at": "2026-08-22T00:00:00Z", "source": "image"}
+    finally:
+        build_identity.cache_clear()
 
 
 def test_provider_failures_have_structured_sanitized_errors():

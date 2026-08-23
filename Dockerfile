@@ -27,6 +27,15 @@ RUN mkdir -p /app/data && chown app:app /app/data
 
 USER app
 
+# Build identity, surfaced by /health and /api/health. Declared last so a new
+# commit only invalidates this layer, not the pip install above.
+ARG GIT_SHA=""
+ARG GIT_REF=""
+ARG BUILD_TIME=""
+ENV GIT_SHA=${GIT_SHA} \
+    GIT_REF=${GIT_REF} \
+    BUILD_TIME=${BUILD_TIME}
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
