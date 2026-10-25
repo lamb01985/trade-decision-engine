@@ -2,6 +2,19 @@
 
 See [REALTIME_DATA.md](REALTIME_DATA.md) for the stock-data path, freshness safety contract, and provider-backed Monday verification procedure.
 
+## Nightly market intelligence
+
+Build the read-only intraday/swing market map with:
+
+```bash
+.venv/bin/python -m app.market_intelligence --as-of 2026-10-26
+```
+
+The command writes reproducible JSON/Markdown reports and a local SQLite research
+store. It does not place orders or connect to a broker. See
+[Market Intelligence Phase 1](docs/MARKET_INTELLIGENCE_PHASE1.md) for methodology,
+entitlements, scheduling, and limitations.
+
 ## Historical baseline backtest
 
 The backtest is a **non-optimizing, event-driven replay**. It invokes the same production analysis and `StandardDecision` path used by the scanner at each completed five-minute checkpoint; it does not define a separate setup library. Future minute bars are used only after a confirmed decision has been recorded to model execution and subsequent outcomes.

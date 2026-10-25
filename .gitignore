@@ -45,6 +45,7 @@ data/replay_cache/
 data/backtest_reports/
 data/backtest_*.json
 data/backtest_*.md
+data/market_intelligence_reports/
 
 # Local delivery artifacts and archived working copies
 *.patch

@@ -14,6 +14,18 @@ class StockObservation:
     source: str
 
 
+@dataclass(frozen=True)
+class AggregateBatch:
+    """Normalized bars plus the provider facts required for reproducible research."""
+    symbol: str
+    timespan: str
+    adjusted: bool
+    bars: tuple[Bar, ...]
+    request_id: str | None
+    retrieved_at: datetime
+    provider_status: str
+
+
 class MarketDataError(RuntimeError):
     """A provider returned an unusable response."""
 

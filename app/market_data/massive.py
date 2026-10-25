@@ -5,7 +5,7 @@ from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 import httpx
 
-from app.market_data.base import MarketDataError, MarketDataProvider, StockObservation
+from app.market_data.base import AggregateBatch, MarketDataError, MarketDataProvider, StockObservation
 from app.models import Bar
 
 logger = logging.getLogger(__name__)
@@ -116,6 +116,31 @@ class MassiveMarketDataProvider(MarketDataProvider):
             raise MarketDataError("Massive aggregate pages are not strictly chronological")
         return bars
 
+    async def get_daily_bars(self, symbol: str, start: date, end: date,
+                             adjusted: bool = True) -> AggregateBatch:
+        """Return daily bars with adjustment and request provenance preserved."""
+        ticker = symbol.strip().upper()
+        path = f"/v2/aggs/ticker/{ticker}/range/1/day/{start.isoformat()}/{end.isoformat()}"
+        payload = await self._get_paginated_payload(path, {
+            "adjusted": str(adjusted).lower(), "sort": "asc", "limit": 50000,
+        })
+        results = payload.get("results", [])
+        bars = tuple(Bar(
+            timestamp=datetime.fromtimestamp(item["t"] / 1000, tz=timezone.utc),
+            open=item["o"], high=item["h"], low=item["l"], close=item["c"], volume=item["v"],
+        ) for item in results)
+        if not bars:
+            raise MarketDataError(f"No daily market data returned for {ticker}")
+        if any(left.timestamp >= right.timestamp for left, right in zip(bars, bars[1:])):
+            raise MarketDataError("Massive daily aggregate pages are not strictly chronological")
+        returned_adjusted = payload.get("adjusted")
+        normalized_adjusted = (returned_adjusted.lower() == "true"
+                               if isinstance(returned_adjusted, str) else returned_adjusted)
+        if normalized_adjusted is not None and normalized_adjusted is not adjusted:
+            raise MarketDataError("Massive daily aggregate adjustment status did not match the request")
+        return AggregateBatch(ticker, "1day", adjusted, bars, payload.get("request_id"),
+                              datetime.now(timezone.utc), str(payload.get("status", "UNKNOWN")))
+
     async def resolve_active_futures_contract(self, product_code: str, as_of: date) -> dict:
         """Resolve a dated active contract; a root such as NQ is not an aggregate ticker."""
         product = product_code.strip().upper()
@@ -124,7 +149,7 @@ class MassiveMarketDataProvider(MarketDataProvider):
             "active": "true",
             "date": as_of.isoformat(),
             "type": "single",
-            "sort": "days_to_maturity.asc",
+            "sort": "ticker.asc",
             "limit": 1000,
         })
         contracts = [item for item in payload.get("results", []) if item.get("active") and item.get("ticker")]
@@ -135,7 +160,7 @@ class MassiveMarketDataProvider(MarketDataProvider):
     async def get_futures_minute_bars(self, contract_ticker: str, start: date, end: date) -> list[Bar]:
         """Fetch normalized futures minute bars without applying an equity session model."""
         contract = contract_ticker.strip().upper()
-        payload = await self._get_payload(f"/futures/v1/aggs/{contract}", {
+        payload = await self._get_paginated_payload(f"/futures/v1/aggs/{contract}", {
             "resolution": "1min",
             "window_start.gte": start.isoformat(),
             "window_start.lte": end.isoformat(),

@@ -57,6 +57,27 @@ def test_aggregate_request_construction_preserves_params_and_query_authenticatio
     }
 
 
+def test_daily_aggregates_preserve_adjustment_and_request_provenance():
+    async def scenario():
+        provider = MassiveMarketDataProvider("known-test-key")
+        async def fake(path, params):
+            assert path.endswith("/QQQ/range/1/day/2026-10-01/2026-10-23")
+            assert params["adjusted"] == "false"
+            return {"status": "OK", "adjusted": False, "request_id": "daily-request",
+                    "results": [{"t": 1792728000000, "o": 1, "h": 2, "l": .5, "c": 1.5, "v": 10}]}
+        provider._get_paginated_payload = fake
+        batch = await provider.get_daily_bars("qqq", date(2026, 10, 1), date(2026, 10, 23), False)
+        await provider.close()
+        return batch
+    from datetime import date
+    batch = asyncio.run(scenario())
+    assert batch.symbol == "QQQ"
+    assert batch.adjusted is False
+    assert batch.request_id == "daily-request"
+    assert batch.provider_status == "OK"
+    assert batch.bars[0].close == 1.5
+
+
 def test_aggregate_pagination_follows_next_url_without_reusing_embedded_key():
     async def scenario():
         provider = MassiveMarketDataProvider("known-test-key")
