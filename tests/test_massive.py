@@ -78,6 +78,30 @@ def test_daily_aggregates_preserve_adjustment_and_request_provenance():
     assert batch.bars[0].close == 1.5
 
 
+def test_option_trade_and_quote_samples_use_verified_routes_and_cutoff():
+    async def scenario():
+        from datetime import date, datetime, timezone
+        provider = MassiveMarketDataProvider("known-test-key")
+        calls = []
+        async def fake(path, params):
+            calls.append((path, params))
+            return {"status": "OK", "results": [{"sip_timestamp": 1}],
+                    "next_url": "https://api.massive.com/next"}
+        provider._get_payload = fake
+        cutoff = datetime(2026, 10, 23, 20, 15, tzinfo=timezone.utc)
+        trades = await provider.get_option_trades("O:QQQ261026C00700000",
+                                                   date(2026, 10, 23), cutoff)
+        quotes = await provider.get_option_quotes("O:QQQ261026C00700000",
+                                                   date(2026, 10, 23), cutoff)
+        await provider.close()
+        return calls, trades, quotes
+    calls, trades, quotes = asyncio.run(scenario())
+    assert calls[0][0] == "/v3/trades/O:QQQ261026C00700000"
+    assert calls[1][0] == "/v3/quotes/O:QQQ261026C00700000"
+    assert calls[0][1]["timestamp.lte"] == "2026-10-23T20:15:00+00:00"
+    assert trades["complete"] is quotes["complete"] is False
+
+
 def test_aggregate_pagination_follows_next_url_without_reusing_embedded_key():
     async def scenario():
         provider = MassiveMarketDataProvider("known-test-key")

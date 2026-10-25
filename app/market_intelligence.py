@@ -19,6 +19,8 @@ from app.engines.market import ET, regular_session_bars, resample
 from app.market_data.base import AggregateBatch, MarketDataError
 from app.market_data.massive import MassiveMarketDataProvider
 from app.models import Bar
+from app.options_flow_engine import (classify_trade_flow, gamma_scenarios, positioning,
+                                     stock_confirmation, unusual_activity, volatility)
 from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSION
 
 DEFAULT_SYMBOLS = ("QQQ", "SPY", "IWM", "SMH", "AMD", "NVDA", "MU", "CRWV")
@@ -34,6 +36,12 @@ class IntelligenceProvider(Protocol):
     async def get_active_option_contracts(self, underlying_symbol: str, as_of: date) -> list[dict]: ...
     async def get_options_chain_snapshot(self, underlying_symbol: str, expiration_date: str,
                                          strike_low: float, strike_high: float) -> list[dict]: ...
+    async def get_option_daily_bars(self, option_ticker: str, start: date,
+                                    end: date) -> AggregateBatch: ...
+    async def get_option_trades(self, option_ticker: str, session_date: date,
+                                cutoff: datetime, limit: int = 250) -> dict: ...
+    async def get_option_quotes(self, option_ticker: str, session_date: date,
+                                cutoff: datetime, limit: int = 1000) -> dict: ...
 
 
 def _plain(value: Any) -> Any:
@@ -84,7 +92,46 @@ class IntelligenceStore:
           evaluated_at TEXT NOT NULL, outcome_json TEXT NOT NULL,
           FOREIGN KEY(hypothesis_id) REFERENCES hypotheses(hypothesis_id)
         );
+        CREATE TABLE IF NOT EXISTS option_contract_snapshots (
+          snapshot_date TEXT NOT NULL, symbol TEXT NOT NULL, ticker TEXT NOT NULL,
+          observed_at TEXT NOT NULL, expiration TEXT, strike REAL, contract_type TEXT,
+          open_interest REAL, volume REAL, implied_volatility REAL,
+          quote_timestamp TEXT, payload_json TEXT NOT NULL,
+          PRIMARY KEY(snapshot_date, ticker)
+        );
         """)
+        self.connection.commit()
+
+    def prior_option_snapshot(self, symbol: str, before_date: date) -> tuple[dict[str, float], list[float]]:
+        rows = self.connection.execute("""SELECT ticker, open_interest, implied_volatility
+          FROM option_contract_snapshots WHERE symbol=? AND snapshot_date=(
+            SELECT max(snapshot_date) FROM option_contract_snapshots
+            WHERE symbol=? AND snapshot_date<?)""", (symbol, symbol, before_date.isoformat())).fetchall()
+        oi = {ticker: value for ticker, value, _ in rows if value is not None}
+        iv = [value for _, _, value in rows if value is not None]
+        return oi, iv
+
+    def option_iv_history(self, symbol: str, before_date: date) -> list[float]:
+        rows = self.connection.execute("""SELECT snapshot_date, avg(implied_volatility)
+          FROM option_contract_snapshots WHERE symbol=? AND snapshot_date<?
+          AND implied_volatility IS NOT NULL GROUP BY snapshot_date ORDER BY snapshot_date""",
+          (symbol, before_date.isoformat())).fetchall()
+        return [value for _, value in rows]
+
+    def save_option_snapshot(self, report_date: date, symbol: str,
+                             observed_at: datetime, chain: list[dict]) -> None:
+        for item in chain:
+            details, day, quote = (item.get(key) or {} for key in ("details", "day", "last_quote"))
+            ticker = details.get("ticker")
+            if not ticker: continue
+            quote_time = _provider_timestamp(quote.get("last_updated"))
+            self.connection.execute("""INSERT OR REPLACE INTO option_contract_snapshots
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""", (
+                report_date.isoformat(), symbol, ticker, observed_at.isoformat(),
+                details.get("expiration_date"), details.get("strike_price"),
+                details.get("contract_type"), item.get("open_interest"), day.get("volume"),
+                item.get("implied_volatility"), quote_time.isoformat() if quote_time else None,
+                canonical_json(item)))
         self.connection.commit()
 
     def save_batch(self, batch: AggregateBatch) -> str:
@@ -446,6 +493,61 @@ def options_report(symbol: str, snapshot: dict, expiration: str, chain: list[dic
             "prohibited_inference": "No unusual or institutional activity is inferred."}
 
 
+async def _phase2_options_report(provider: IntelligenceProvider, store: IntelligenceStore,
+                                 symbol: str, as_of: date, snapshot: dict,
+                                 chains: list[dict], daily: dict, intra: dict,
+                                 daily_closes: list[float], cutoff: datetime) -> dict:
+    combined = [item for group in chains for item in group["contracts"]]
+    previous_oi, _ = store.prior_option_snapshot(symbol, as_of)
+    volume_history: dict[str, list[float]] = {}
+    ranked = sorted(combined, key=lambda item: (item.get("day") or {}).get("volume") or -1,
+                    reverse=True)
+    baseline_errors = []
+    if hasattr(provider, "get_option_daily_bars"):
+        for item in ranked[:3]:
+            ticker = (item.get("details") or {}).get("ticker")
+            if not ticker: continue
+            try:
+                batch = await provider.get_option_daily_bars(ticker, as_of - timedelta(days=45),
+                                                              cutoff.astimezone(ET).date())
+                volume_history[ticker] = [bar.volume for bar in batch.bars
+                                          if bar.timestamp.astimezone(ET).date() <
+                                          cutoff.astimezone(ET).date()]
+            except MarketDataError as exc:
+                baseline_errors.append({"ticker": ticker, "error": str(exc)})
+    flow = {"status": "UNAVAILABLE", "reason": "Provider trade/quote methods are not available"}
+    if ranked and hasattr(provider, "get_option_trades") and hasattr(provider, "get_option_quotes"):
+        ticker = (ranked[0].get("details") or {}).get("ticker")
+        try:
+            trades = await provider.get_option_trades(ticker, cutoff.astimezone(ET).date(), cutoff)
+            quotes = await provider.get_option_quotes(ticker, cutoff.astimezone(ET).date(), cutoff)
+            flow = {"status": "AVAILABLE", "ticker": ticker,
+                    **classify_trade_flow(trades["results"], quotes["results"],
+                                          trades["complete"], quotes["complete"])}
+        except MarketDataError as exc:
+            flow = {"status": "UNAVAILABLE", "reason": str(exc)}
+    spot = daily["close"]
+    report = {
+        "symbol": symbol, "source_cutoff": cutoff.isoformat(),
+        "expirations": [group["expiration"] for group in chains],
+        "contracts_observed": len(combined),
+        "positioning": positioning(combined, previous_oi),
+        "unusual_activity": unusual_activity(combined, volume_history),
+        "trade_flow": flow,
+        "volatility": volatility(combined, daily_closes,
+                                 store.option_iv_history(symbol, as_of)),
+        "gamma": gamma_scenarios(combined, spot),
+        "stock_confirmation": stock_confirmation(daily, intra),
+        "data_quality": {"baseline_errors": baseline_errors,
+                         "snapshot_history_status": "COMPARABLE" if previous_oi else "FIRST_SNAPSHOT"},
+        "signal_policy": {"confirmation": "Use only with aligned price structure and fresh evidence.",
+                          "invalidation": "Disregard when price invalidates its setup, timestamps are stale, or required fields are missing.",
+                          "limitations": "No institutional identity, opening/closing intent, or verified dealer sign is claimed."},
+    }
+    store.save_option_snapshot(as_of, symbol, cutoff, combined)
+    return report
+
+
 async def build_market_map(provider: IntelligenceProvider, store: IntelligenceStore, as_of: date,
                            symbols: tuple[str, ...] = DEFAULT_SYMBOLS, include_options: bool = True) -> dict:
     start = as_of - timedelta(days=400)
@@ -472,6 +574,8 @@ async def build_market_map(provider: IntelligenceProvider, store: IntelligenceSt
         try: intraday[symbol] = intraday_features(await provider.get_minute_bars(symbol, latest_day, latest_day))
         except MarketDataError as exc: intraday[symbol] = {"available": False, "reason": str(exc)}
     option_reports = []
+    phase2_option_reports = []
+    option_source_cutoffs: list[datetime] = []
     if include_options:
         for symbol in ("QQQ", "SPY"):
             try:
@@ -482,8 +586,27 @@ async def build_market_map(provider: IntelligenceProvider, store: IntelligenceSt
                 expiration = expirations[0]
                 price = (snapshot.get("lastTrade") or {}).get("p") or (snapshot.get("day") or {}).get("c")
                 if not isinstance(price, (int, float)): raise MarketDataError(f"No underlying price returned for {symbol}")
-                chain = await provider.get_options_chain_snapshot(symbol, expiration, price * .85, price * 1.15)
-                option_reports.append(options_report(symbol, snapshot, expiration, chain))
+                chain_groups = []
+                for selected_expiration in expirations[:3]:
+                    selected_chain = await provider.get_options_chain_snapshot(
+                        symbol, selected_expiration, price * .85, price * 1.15)
+                    chain_groups.append({"expiration": selected_expiration,
+                                         "contracts": selected_chain})
+                chain = chain_groups[0]["contracts"]
+                phase1 = options_report(symbol, snapshot, expiration, chain)
+                option_reports.append(phase1)
+                quote_times = [_provider_timestamp((item.get("last_quote") or {}).get("last_updated"))
+                               for group in chain_groups for item in group["contracts"]]
+                option_cutoff = max([cutoff for cutoff in quote_times if cutoff] +
+                                    [_session_close(adjusted[symbol].bars[-1].timestamp)])
+                session_open = datetime.combine(as_of, time(9, 30), ET).astimezone(timezone.utc)
+                if option_cutoff >= session_open:
+                    raise MarketDataError(f"Option snapshot for {symbol} is not point-in-time for {as_of}")
+                option_source_cutoffs.append(option_cutoff)
+                phase2_option_reports.append(await _phase2_options_report(
+                    provider, store, symbol, as_of, snapshot, chain_groups, features[symbol],
+                    intraday.get(symbol, {}), [bar.close for bar in adjusted[symbol].bars],
+                    option_cutoff))
             except MarketDataError as exc:
                 errors.append({"symbol": symbol, "component": "options", "error": str(exc)})
     quality_warnings = []
@@ -495,12 +618,12 @@ async def build_market_map(provider: IntelligenceProvider, store: IntelligenceSt
             quality_warnings.append(f"{option['symbol']}: {quality['missing_quote_timestamps']} contracts lack quote timestamps")
         if quality["missing_open_interest"]:
             quality_warnings.append(f"{option['symbol']}: {quality['missing_open_interest']} contracts lack open interest")
-    cutoff = max((_session_close(batch.bars[-1].timestamp) for batch in adjusted.values()),
-                 default=datetime.now(timezone.utc))
+    cutoff = max([_session_close(batch.bars[-1].timestamp) for batch in adjusted.values()] +
+                 option_source_cutoffs, default=datetime.now(timezone.utc))
     report = {"schema_version": REPORT_SCHEMA_VERSION, "report_date": as_of.isoformat(),
               "generated_at": datetime.now(timezone.utc).isoformat(), "observation_cutoff": cutoff.isoformat(),
               "point_in_time_policy": "Only observations timestamped on or before the report cutoff are inputs",
-              "cutoff_semantics": "End of the latest completed regular session represented by daily bars; daily source timestamps are window starts",
+              "cutoff_semantics": "Latest included provider observation. Equity daily timestamps are window starts; option snapshots may extend through their later market close.",
               "data_quality": {"excluded_report_session_or_future_daily_bars": excluded_report_session_bars,
                                "latest_daily_session_dates": {
                                    symbol: batch.bars[-1].timestamp.astimezone(ET).date().isoformat()
@@ -511,7 +634,8 @@ async def build_market_map(provider: IntelligenceProvider, store: IntelligenceSt
               "intraday_playbook": [intraday_setup(feature, intraday[symbol]) for symbol, feature in features.items()
                                     if intraday.get(symbol, {}).get("available")],
               "swing_playbook": [swing_setup(feature) for feature in features.values()],
-              "options_intelligence": option_reports, "data_errors": errors,
+              "options_intelligence": option_reports,
+              "options_flow_intelligence": phase2_option_reports, "data_errors": errors,
               "outcomes": {"status": "PENDING", "reason": "Next-session outcomes require a later session"}}
     report["prior_outcomes_recorded"] = store.record_available_outcomes(adjusted, datetime.now(timezone.utc))
     input_checksum = _checksum({symbol: [store.save_batch(batch), store.save_batch(raw[symbol])]
@@ -553,6 +677,17 @@ def render_markdown(report: dict) -> str:
                      f"{positioning['put_open_interest']}; call/put volume {positioning['call_trade_volume']}/"
                      f"{positioning['put_trade_volume']}; stale quotes {quality['stale_quotes']}; "
                      f"missing quote timestamps {quality['missing_quote_timestamps']}.")
+    lines += ["", "## Options flow intelligence", ""]
+    for item in report.get("options_flow_intelligence", []):
+        unusual = item["unusual_activity"]
+        flow = item["trade_flow"]
+        vol = item["volatility"]
+        lines.append(f"- **{item['symbol']}** — expirations {', '.join(item['expirations'])}; "
+                     f"{len(unusual['flagged'])} volume-baseline flags; flow {flow['status']} "
+                     f"({flow.get('sampled_trades', 0)} sampled trades); "
+                     f"20d realized vol {vol['realized_volatility_20d_annualized']}; "
+                     f"IV history {vol['history_status']} ({vol['iv_history_observations']} observations).")
+        lines.append(f"  - Limitation: {item['signal_policy']['limitations']}")
     warnings = list(report["data_quality"].get("warnings", []))
     warnings += [str(item) for item in report["data_errors"]]
     lines += ["", "## Data-quality warnings", ""]

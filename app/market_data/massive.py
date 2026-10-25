@@ -248,5 +248,48 @@ class MassiveMarketDataProvider(MarketDataProvider):
         })
         return payload.get("results", [])
 
+    async def get_option_daily_bars(self, option_ticker: str, start: date,
+                                    end: date) -> AggregateBatch:
+        """Return adjusted option bars used only for backward-looking volume baselines."""
+        ticker = option_ticker.strip().upper()
+        payload = await self._get_paginated_payload(
+            f"/v2/aggs/ticker/{ticker}/range/1/day/{start.isoformat()}/{end.isoformat()}",
+            {"adjusted": "true", "sort": "asc", "limit": 50000},
+        )
+        bars = tuple(Bar(
+            timestamp=datetime.fromtimestamp(item["t"] / 1000, tz=timezone.utc),
+            open=item["o"], high=item["h"], low=item["l"], close=item["c"], volume=item["v"],
+        ) for item in payload.get("results", []))
+        if any(left.timestamp >= right.timestamp for left, right in zip(bars, bars[1:])):
+            raise MarketDataError("Massive option aggregate pages are not strictly chronological")
+        return AggregateBatch(ticker, "1day", True, bars, payload.get("request_id"),
+                              datetime.now(timezone.utc), str(payload.get("status", "UNKNOWN")))
+
+    async def get_option_trades(self, option_ticker: str, session_date: date,
+                                cutoff: datetime,
+                                limit: int = 250) -> dict:
+        """Return a bounded recent trade sample and disclose whether more pages exist."""
+        ticker = option_ticker.strip().upper()
+        payload = await self._get_payload(f"/v3/trades/{ticker}", {
+            "timestamp.gte": session_date.isoformat(),
+            "timestamp.lte": cutoff.isoformat(),
+            "sort": "timestamp.desc", "limit": min(max(limit, 1), 5000),
+        })
+        return {"results": payload.get("results", []), "complete": not bool(payload.get("next_url")),
+                "request_id": payload.get("request_id")}
+
+    async def get_option_quotes(self, option_ticker: str, session_date: date,
+                                cutoff: datetime,
+                                limit: int = 1000) -> dict:
+        """Return a bounded recent NBBO sample for point-in-time trade classification."""
+        ticker = option_ticker.strip().upper()
+        payload = await self._get_payload(f"/v3/quotes/{ticker}", {
+            "timestamp.gte": session_date.isoformat(),
+            "timestamp.lte": cutoff.isoformat(),
+            "sort": "timestamp", "order": "desc", "limit": min(max(limit, 1), 5000),
+        })
+        return {"results": payload.get("results", []), "complete": not bool(payload.get("next_url")),
+                "request_id": payload.get("request_id")}
+
     async def close(self) -> None:
         await self._client.aclose()
