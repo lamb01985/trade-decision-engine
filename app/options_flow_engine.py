@@ -58,6 +58,7 @@ def unusual_activity(chain: list[dict], volume_history: dict[str, list[float]]) 
         details, day = item.get("details") or {}, item.get("day") or {}
         ticker = details.get("ticker")
         volume, oi = _number(day.get("volume")), _number(item.get("open_interest"))
+        baseline_queried = ticker in volume_history
         history = [float(value) for value in volume_history.get(ticker, []) if value is not None]
         baseline = mean(history) if len(history) >= MIN_VOLUME_BASELINE_OBSERVATIONS else None
         midpoint = _number((item.get("last_quote") or {}).get("midpoint"))
@@ -69,7 +70,8 @@ def unusual_activity(chain: list[dict], volume_history: dict[str, list[float]]) 
                      "baseline_observations": len(history), "mean_historical_volume": baseline,
                      "volume_baseline_ratio": volume / baseline if volume is not None and baseline else None,
                      "baseline_status": "SUFFICIENT" if baseline is not None else
-                                        "NEW_CONTRACT" if not history else "INSUFFICIENT_HISTORY",
+                                        "INSUFFICIENT_HISTORY" if history else
+                                        "NEW_CONTRACT" if baseline_queried else "MISSING_BASELINE",
                      "estimated_notional_at_quote_midpoint": volume * midpoint * 100
                          if volume is not None and midpoint is not None else None,
                      "flagged": bool(baseline and volume is not None and volume >= 2 * baseline),

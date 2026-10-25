@@ -22,10 +22,15 @@ def test_positioning_does_not_infer_direction_and_preserves_missing_oi():
 
 def test_unusual_activity_requires_history_and_does_not_coerce_missing_values():
     chain = [contract(), contract("O:NEW", volume=None, oi=None)]
-    report = unusual_activity(chain, {"O:QQQ": [5, 6, 7, 8, 9]})
+    report = unusual_activity(chain, {"O:QQQ": [5, 6, 7, 8, 9], "O:NEW": []})
     assert report["contracts"][0]["flagged"] is True
     assert report["contracts"][1]["volume_oi_ratio"] is None
     assert report["contracts"][1]["baseline_status"] == "NEW_CONTRACT"
+
+
+def test_unusual_activity_calls_unqueried_history_missing_not_new():
+    report = unusual_activity([contract("O:UNQUERIED")], {})
+    assert report["contracts"][0]["baseline_status"] == "MISSING_BASELINE"
 
 
 def test_trade_flow_uses_only_prior_timestamp_aligned_quote():
