@@ -4,8 +4,9 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 
 from app.market_data.base import AggregateBatch
-from app.market_intelligence import (IntelligenceStore, build_market_map, daily_features,
-                                     intraday_features, options_report, rsi)
+from app.market_intelligence import (IntelligenceStore, _completed_daily_batch, _session_close,
+                                     build_market_map, daily_features, intraday_features,
+                                     options_report, rsi)
 from app.models import Bar
 
 
@@ -35,7 +36,8 @@ class FakeProvider:
         return minute_bars()
 
     async def get_stock_snapshot(self, symbol):
-        return {"lastTrade": {"p": 190}, "updated": 1792800000000000000}
+        return {"lastTrade": {"p": 190, "t": 1792799960000000000},
+                "updated": 1792800000000000000}
 
     async def get_active_option_contracts(self, symbol, as_of):
         return [{"ticker": f"O:{symbol}", "expiration_date": "2026-10-26"}]
@@ -43,7 +45,8 @@ class FakeProvider:
     async def get_options_chain_snapshot(self, symbol, expiration, low, high):
         return [{"details": {"ticker": f"O:{symbol}261026C00190000", "contract_type": "call",
                              "expiration_date": expiration, "strike_price": 190},
-                 "last_quote": {"bid": 4.9, "ask": 5.1, "timeframe": "REAL-TIME"},
+                 "last_quote": {"bid": 4.9, "ask": 5.1, "timeframe": "REAL-TIME",
+                                "last_updated": 1792799950000000000},
                  "day": {"volume": 200}, "open_interest": 500, "implied_volatility": .3,
                  "greeks": {"delta": .5, "gamma": .02, "theta": -.1, "vega": .08}}]
 
@@ -72,11 +75,35 @@ def test_intraday_features_require_sufficient_data_and_include_one_hour_structur
 
 def test_options_report_separates_observations_from_estimates():
     chain = asyncio.run(FakeProvider().get_options_chain_snapshot("QQQ", "2026-10-26", 0, 999))
-    result = options_report("QQQ", {"lastTrade": {"p": 190}}, "2026-10-26", chain)
+    result = options_report("QQQ", {"lastTrade": {"p": 190, "t": 1792799960000000000}},
+                            "2026-10-26", chain)
     assert result["liquid_contracts"] == 1
     assert result["strike_concentration"] == [{"strike": 190.0, "open_interest": 500.0}]
     assert result["contracts"][0]["midpoint"] == 5.0
+    assert result["contracts"][0]["liquidity_pass"] is True
+    assert result["contracts"][0]["trade_volume_status"] == "OBSERVED"
     assert "No unusual" in result["prohibited_inference"]
+
+
+def test_options_liquidity_rejects_missing_or_stale_fields_instead_of_coercing_to_zero():
+    chain = [{"details": {"ticker": "O:QQQ", "contract_type": "call",
+                          "expiration_date": "2026-10-26", "strike_price": 190},
+              "last_quote": {"bid": 4.9, "ask": 5.1,
+                             "last_updated": 1792790000000000000},
+              "day": {}},
+             {"details": {"ticker": "O:QQQ2", "contract_type": "call",
+                          "expiration_date": "2026-10-26", "strike_price": 191},
+              "last_quote": {"bid": 4.0, "ask": 4.1,
+                             "last_updated": 1792799960000000000},
+              "day": {"volume": 1}, "open_interest": 1}]
+    result = options_report("QQQ", {"lastTrade": {"p": 190, "t": 1792799960000000000}},
+                            "2026-10-26", chain)
+    contract = result["contracts"][0]
+    assert result["liquid_contracts"] == 0
+    assert contract["open_interest"] is None
+    assert contract["volume"] is None
+    assert contract["liquidity_pass"] is False
+    assert {"stale_quote", "missing_open_interest"} <= set(contract["liquidity_failures"])
 
 
 def test_market_map_is_reproducible_and_persists_sources_reports_and_hypotheses(tmp_path):
@@ -121,3 +148,13 @@ def test_outcomes_are_recorded_only_when_a_later_bar_exists(tmp_path):
     row = store.connection.execute("SELECT status FROM next_session_outcomes").fetchone()
     store.close()
     assert row[0] == "TARGET_1"
+
+
+def test_report_date_bars_are_excluded_and_cutoff_is_session_close():
+    batch = daily_batch("QQQ", days=2)
+    from app.engines.market import ET
+    report_date = batch.bars[-1].timestamp.astimezone(ET).date()
+    completed, excluded = _completed_daily_batch(batch, report_date)
+    assert excluded == 1
+    assert completed.bars == batch.bars[:-1]
+    assert _session_close(completed.bars[-1].timestamp).astimezone(ET).time().isoformat() == "16:00:00"

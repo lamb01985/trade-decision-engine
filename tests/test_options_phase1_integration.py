@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
 from fastapi.testclient import TestClient
 
@@ -7,13 +8,24 @@ from app.models import ActionNow, DecisionQuality, SetupFamily, SetupProgress
 from tests.test_options_plan import FakePlanProvider, analysis, decision, liquid_call
 
 
-def test_options_plan_api_consumes_service_decision_and_returns_downstream_contract():
+def test_options_plan_api_consumes_service_decision_and_returns_downstream_contract(monkeypatch):
+    import app.options_intelligence as options_module
+    from app.freshness import DataStatus, MarketSession
+    monkeypatch.setattr(options_module, "classify_data",
+                        lambda timestamp, now=None: (DataStatus.LIVE, MarketSession.REGULAR, 0.0))
     class FrozenService:
         async def analyze_symbol(self, symbol, include_cross_market=False, force=False):
             assert (symbol, include_cross_market, force) == ("QQQ", False, True)
             return analysis(decision(ActionNow.LONG_TRIGGERED, SetupProgress.CONFIRMED, DecisionQuality.B))
 
-    provider = FakePlanProvider([liquid_call()])
+    expiration = (datetime.now(timezone.utc).date() + timedelta(days=7)).isoformat()
+    contract = liquid_call()
+    contract["details"] = dict(contract["details"], expiration_date=expiration)
+    provider = FakePlanProvider([contract])
+    async def active_contracts(symbol, _as_of):
+        provider.calls.append(("contracts", symbol))
+        return [{"ticker": contract["details"]["ticker"], "expiration_date": expiration}]
+    provider.get_active_option_contracts = active_contracts
     with TestClient(app) as client:
         app.state.service = FrozenService()
         app.state.market_data_provider = provider

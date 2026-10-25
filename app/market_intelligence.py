@@ -8,7 +8,7 @@ import json
 import sqlite3
 from collections import defaultdict
 from dataclasses import asdict, dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from statistics import mean
 from typing import Any, Protocol
@@ -23,6 +23,7 @@ from app.versioning import ENGINE_VERSION, PARAMETER_VERSION, SETUP_RULES_VERSIO
 
 DEFAULT_SYMBOLS = ("QQQ", "SPY", "IWM", "SMH", "AMD", "NVDA", "MU", "CRWV")
 REPORT_SCHEMA_VERSION = "market-intelligence-v1"
+OPTION_QUOTE_MAX_AGE_SECONDS = 15 * 60
 
 
 class IntelligenceProvider(Protocol):
@@ -198,11 +199,30 @@ def _return(closes: list[float], sessions: int) -> float | None:
     return ((closes[-1] / closes[-sessions-1]) - 1) * 100 if len(closes) > sessions else None
 
 
-def daily_features(batch: AggregateBatch, benchmark: AggregateBatch | None = None) -> dict:
+def _completed_daily_batch(batch: AggregateBatch, report_date: date) -> tuple[AggregateBatch, int]:
+    """Exclude the report session itself; reports are pre-session market maps."""
+    bars = tuple(bar for bar in batch.bars if bar.timestamp.astimezone(ET).date() < report_date)
+    if not bars:
+        raise MarketDataError(f"No completed daily bars precede {report_date} for {batch.symbol}")
+    return AggregateBatch(batch.symbol, batch.timespan, batch.adjusted, bars, batch.request_id,
+                          batch.retrieved_at, batch.provider_status), len(batch.bars) - len(bars)
+
+
+def _session_close(timestamp: datetime) -> datetime:
+    session_date = timestamp.astimezone(ET).date()
+    return datetime.combine(session_date, time(16, 0), ET).astimezone(timezone.utc)
+
+
+def daily_features(batch: AggregateBatch, benchmark: AggregateBatch | None = None,
+                   report_date: date | None = None) -> dict:
     bars = list(batch.bars)
     closes = [bar.close for bar in bars]
     weekly = _weekly_bars(bars)
-    completed_week = weekly[-2] if len(weekly) > 1 else None
+    target_date = report_date or bars[-1].timestamp.astimezone(ET).date() + timedelta(days=1)
+    target_week = target_date.isocalendar()[:2]
+    completed_weeks = [bar for bar in weekly
+                       if bar.timestamp.astimezone(ET).date().isocalendar()[:2] < target_week]
+    completed_week = completed_weeks[-1] if completed_weeks else None
     prior = bars[-2] if len(bars) > 1 else None
     ema20, ema50 = ema(closes, 20)[-1], ema(closes, 50)[-1]
     atr14 = average_true_range(bars, 14)
@@ -216,6 +236,8 @@ def daily_features(batch: AggregateBatch, benchmark: AggregateBatch | None = Non
                         ([completed_week.high, completed_week.low] if completed_week else [])))
     return {
         "symbol": batch.symbol, "source_timestamp": bars[-1].timestamp.isoformat(),
+        "session_date": bars[-1].timestamp.astimezone(ET).date().isoformat(),
+        "session_close": _session_close(bars[-1].timestamp).isoformat(),
         "adjusted": batch.adjusted, "close": price,
         "previous_day": ({"open": prior.open, "high": prior.high, "low": prior.low,
                           "close": prior.close, "volume": prior.volume} if prior else None),
@@ -319,34 +341,104 @@ def intraday_setup(feature: dict, intra: dict) -> dict:
                             "Retest fails or closes through invalidation", "Data is not current for the session"]}
 
 
+def _provider_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, (int, float)) or value <= 0: return None
+    divisor = 1_000_000_000 if value > 10**16 else 1_000 if value > 10**11 else 1
+    return datetime.fromtimestamp(value / divisor, tz=timezone.utc)
+
+
+def _snapshot_market_timestamp(snapshot: dict) -> datetime | None:
+    values = [(snapshot.get("lastTrade") or {}).get("t"),
+              (snapshot.get("lastQuote") or {}).get("t"),
+              (snapshot.get("min") or {}).get("t")]
+    timestamps = [item for item in (_provider_timestamp(value) for value in values) if item]
+    return max(timestamps) if timestamps else _provider_timestamp(snapshot.get("updated"))
+
+
 def options_report(symbol: str, snapshot: dict, expiration: str, chain: list[dict]) -> dict:
     rows = []
     concentration: dict[float, float] = defaultdict(float)
+    underlying_timestamp = _snapshot_market_timestamp(snapshot)
+    chain_quote_timestamps = [_provider_timestamp((item.get("last_quote") or {}).get("last_updated"))
+                              for item in chain]
+    reference_timestamp = max((item for item in chain_quote_timestamps if item), default=None)
+    missing_quote = missing_quote_timestamp = stale_quote = missing_oi = missing_volume = 0
     for item in chain:
-        details, quote, greeks = item.get("details") or {}, item.get("last_quote") or {}, item.get("greeks") or {}
+        details = item.get("details") or {}
+        quote = item.get("last_quote") or {}
+        greeks = item.get("greeks") or {}
         bid, ask = quote.get("bid"), quote.get("ask")
-        midpoint = (bid + ask) / 2 if isinstance(bid, (int, float)) and isinstance(ask, (int, float)) and ask >= bid else None
+        midpoint = ((bid + ask) / 2 if isinstance(bid, (int, float))
+                    and isinstance(ask, (int, float)) and ask >= bid else None)
         spread_pct = ((ask - bid) / midpoint * 100) if midpoint else None
         oi = item.get("open_interest")
+        volume = (item.get("day") or {}).get("volume")
         strike = details.get("strike_price")
-        if isinstance(strike, (int, float)) and isinstance(oi, (int, float)): concentration[float(strike)] += float(oi)
-        rows.append({"ticker": details.get("ticker"), "type": details.get("contract_type"), "strike": strike,
-                     "expiration": details.get("expiration_date"), "bid": bid, "ask": ask,
-                     "midpoint": midpoint, "spread_pct": spread_pct, "open_interest": oi,
-                     "volume": (item.get("day") or {}).get("volume"), "iv": item.get("implied_volatility"),
+        if isinstance(strike, (int, float)) and isinstance(oi, (int, float)):
+            concentration[float(strike)] += float(oi)
+        quote_timestamp = _provider_timestamp(quote.get("last_updated"))
+        quote_age = (max(0.0, (reference_timestamp - quote_timestamp).total_seconds())
+                     if reference_timestamp and quote_timestamp else None)
+        quote_is_stale = quote_age is None or quote_age > OPTION_QUOTE_MAX_AGE_SECONDS
+        failures = []
+        if midpoint is None: failures.append("missing_or_crossed_quote"); missing_quote += 1
+        if quote_timestamp is None:
+            failures.append("missing_quote_timestamp"); missing_quote_timestamp += 1
+        elif quote_is_stale:
+            failures.append("stale_quote"); stale_quote += 1
+        if not isinstance(oi, (int, float)):
+            failures.append("missing_open_interest"); missing_oi += 1
+        if not isinstance(volume, (int, float)): missing_volume += 1
+        if isinstance(spread_pct, (int, float)) and spread_pct > 10:
+            failures.append("spread_above_10_pct")
+        if isinstance(oi, (int, float)) and oi < 100:
+            failures.append("open_interest_below_100")
+        rows.append({"ticker": details.get("ticker"), "type": details.get("contract_type"),
+                     "strike": strike, "expiration": details.get("expiration_date"),
+                     "bid": bid, "ask": ask, "midpoint": midpoint, "spread_pct": spread_pct,
+                     "open_interest": oi,
+                     "open_interest_status": "OBSERVED" if isinstance(oi, (int, float)) else "MISSING",
+                     "volume": volume,
+                     "trade_volume_status": "OBSERVED" if isinstance(volume, (int, float)) else "MISSING",
+                     "iv": item.get("implied_volatility"),
                      "greeks": {key: greeks.get(key) for key in ("delta", "gamma", "theta", "vega")},
-                     "quote_timeframe": quote.get("timeframe")})
-    liquid = [row for row in rows if isinstance(row["open_interest"], (int, float)) and row["open_interest"] >= 100
-              and isinstance(row["spread_pct"], (int, float)) and row["spread_pct"] <= 10]
-    underlying_timestamp = snapshot.get("updated")
+                     "quote_timeframe": quote.get("timeframe"),
+                     "quote_timestamp": quote_timestamp.isoformat() if quote_timestamp else None,
+                     "quote_age_seconds_at_underlying_snapshot": quote_age,
+                     "quote_stale": quote_is_stale, "liquidity_pass": not failures,
+                     "liquidity_failures": failures})
+    liquid = [row for row in rows if row["liquidity_pass"]]
+    call_oi = sum(row["open_interest"] for row in rows
+                  if row["type"] == "call" and isinstance(row["open_interest"], (int, float)))
+    put_oi = sum(row["open_interest"] for row in rows
+                 if row["type"] == "put" and isinstance(row["open_interest"], (int, float)))
+    call_volume = sum(row["volume"] for row in rows
+                      if row["type"] == "call" and isinstance(row["volume"], (int, float)))
+    put_volume = sum(row["volume"] for row in rows
+                     if row["type"] == "put" and isinstance(row["volume"], (int, float)))
     return {"symbol": symbol, "expiration": expiration, "underlying_price":
             (snapshot.get("lastTrade") or {}).get("p") or (snapshot.get("day") or {}).get("c"),
-            "underlying_raw_timestamp": underlying_timestamp, "contracts_observed": len(rows),
-            "liquid_contracts": len(liquid),
+            "underlying_raw_timestamp": snapshot.get("updated"),
+            "underlying_market_timestamp": underlying_timestamp.isoformat() if underlying_timestamp else None,
+            "quote_reference_timestamp": reference_timestamp.isoformat() if reference_timestamp else None,
+            "contracts_observed": len(rows), "liquid_contracts": len(liquid),
+            "pagination_complete": True,
+            "positioning_summary": {"call_open_interest": call_oi, "put_open_interest": put_oi,
+                                    "put_call_open_interest_ratio": put_oi / call_oi if call_oi else None,
+                                    "call_trade_volume": call_volume, "put_trade_volume": put_volume,
+                                    "put_call_trade_volume_ratio": put_volume / call_volume if call_volume else None,
+                                    "scope": "Returned expiration and bounded strike window only"},
+            "data_quality": {"missing_quotes": missing_quote,
+                             "missing_quote_timestamps": missing_quote_timestamp,
+                             "stale_quotes": stale_quote, "missing_open_interest": missing_oi,
+                             "missing_trade_volume": missing_volume,
+                             "quote_max_age_seconds": OPTION_QUOTE_MAX_AGE_SECONDS},
             "strike_concentration": [{"strike": strike, "open_interest": oi} for strike, oi in
                                      sorted(concentration.items(), key=lambda pair: pair[1], reverse=True)[:10]],
-            "contracts": rows, "observations": ["Open interest is provider-returned and generally prior-day data",
-              "Liquidity screen requires OI >= 100 and quoted spread <= 10%"],
+            "contracts": rows,
+            "observations": ["Open interest is provider-returned prior-session positioning, not trade volume",
+              "Trade volume is provider-returned current/latest-session contract volume",
+              "Liquidity requires OI >= 100, spread <= 10%, and a quote within 15 minutes of the underlying snapshot"],
             "estimates": ["Midpoint and spread percentage are calculated from the returned bid/ask"],
             "prohibited_inference": "No unusual or institutional activity is inferred."}
 
@@ -356,16 +448,21 @@ async def build_market_map(provider: IntelligenceProvider, store: IntelligenceSt
     start = as_of - timedelta(days=400)
     adjusted: dict[str, AggregateBatch] = {}
     raw: dict[str, AggregateBatch] = {}
+    excluded_report_session_bars: dict[str, dict[str, int]] = {}
     errors: list[dict] = []
     for symbol in symbols:
         try:
-            adjusted[symbol] = await provider.get_daily_bars(symbol, start, as_of, True)
-            raw[symbol] = await provider.get_daily_bars(symbol, start, as_of, False)
+            adjusted_full = await provider.get_daily_bars(symbol, start, as_of, True)
+            raw_full = await provider.get_daily_bars(symbol, start, as_of, False)
+            adjusted[symbol], adjusted_excluded = _completed_daily_batch(adjusted_full, as_of)
+            raw[symbol], raw_excluded = _completed_daily_batch(raw_full, as_of)
+            excluded_report_session_bars[symbol] = {"adjusted": adjusted_excluded,
+                                                     "unadjusted": raw_excluded}
             store.save_batch(adjusted[symbol]); store.save_batch(raw[symbol])
         except MarketDataError as exc:
             errors.append({"symbol": symbol, "component": "daily", "error": str(exc)})
     benchmark = adjusted.get("SPY")
-    features = {symbol: daily_features(batch, benchmark) for symbol, batch in adjusted.items()}
+    features = {symbol: daily_features(batch, benchmark, as_of) for symbol, batch in adjusted.items()}
     intraday: dict[str, dict] = {}
     for symbol, batch in adjusted.items():
         latest_day = batch.bars[-1].timestamp.astimezone(ET).date()
@@ -386,10 +483,26 @@ async def build_market_map(provider: IntelligenceProvider, store: IntelligenceSt
                 option_reports.append(options_report(symbol, snapshot, expiration, chain))
             except MarketDataError as exc:
                 errors.append({"symbol": symbol, "component": "options", "error": str(exc)})
-    cutoff = max((batch.bars[-1].timestamp for batch in adjusted.values()), default=datetime.now(timezone.utc))
+    quality_warnings = []
+    for option in option_reports:
+        quality = option["data_quality"]
+        if quality["stale_quotes"]:
+            quality_warnings.append(f"{option['symbol']}: {quality['stale_quotes']} stale option quotes excluded from liquidity")
+        if quality["missing_quote_timestamps"]:
+            quality_warnings.append(f"{option['symbol']}: {quality['missing_quote_timestamps']} contracts lack quote timestamps")
+        if quality["missing_open_interest"]:
+            quality_warnings.append(f"{option['symbol']}: {quality['missing_open_interest']} contracts lack open interest")
+    cutoff = max((_session_close(batch.bars[-1].timestamp) for batch in adjusted.values()),
+                 default=datetime.now(timezone.utc))
     report = {"schema_version": REPORT_SCHEMA_VERSION, "report_date": as_of.isoformat(),
               "generated_at": datetime.now(timezone.utc).isoformat(), "observation_cutoff": cutoff.isoformat(),
               "point_in_time_policy": "Only observations timestamped on or before the report cutoff are inputs",
+              "cutoff_semantics": "End of the latest completed regular session represented by daily bars; daily source timestamps are window starts",
+              "data_quality": {"excluded_report_session_or_future_daily_bars": excluded_report_session_bars,
+                               "latest_daily_session_dates": {
+                                   symbol: batch.bars[-1].timestamp.astimezone(ET).date().isoformat()
+                                   for symbol, batch in adjusted.items()},
+                               "warnings": quality_warnings},
               "market_regime": market_regime(features), "daily_features": features,
               "intraday_features": intraday,
               "intraday_playbook": [intraday_setup(feature, intraday[symbol]) for symbol, feature in features.items()
@@ -407,21 +520,40 @@ async def build_market_map(provider: IntelligenceProvider, store: IntelligenceSt
 def render_markdown(report: dict) -> str:
     lines = [f"# TradeHub Market Map — {report['report_date']}", "",
              f"Observation cutoff: `{report['observation_cutoff']}`", "",
-             f"Market regime: **{report['market_regime']['label']}**", "",
-             "## Swing playbook", ""]
-    for item in report["swing_playbook"]:
+             "## Executive summary", "",
+             f"- Market regime: **{report['market_regime']['label']}**",
+             f"- Intraday directional setups: {sum(x['direction'] != 'NEUTRAL' for x in report['intraday_playbook'])}",
+             f"- Swing directional setups: {sum(x['direction'] != 'NEUTRAL' for x in report['swing_playbook'])}",
+             f"- Provider errors: {len(report['data_errors'])}", "",
+             "## QQQ / SPY levels", ""]
+    for symbol in ("QQQ", "SPY"):
+        item = report["daily_features"].get(symbol)
+        if item:
+            lines.append(f"- **{symbol}** — close {item['close']}; prior-day H/L/C "
+                         f"{item['previous_day']['high']}/{item['previous_day']['low']}/{item['previous_day']['close']}; "
+                         f"prior-week H/L {item['previous_week']['high']}/{item['previous_week']['low']}; "
+                         f"EMA20/EMA50 {item['ema20']:.2f}/{item['ema50']:.2f}; RSI14 {item['rsi14']:.2f}")
+    lines += ["", "## Top intraday setups", ""]
+    for item in [x for x in report["intraday_playbook"] if x["direction"] != "NEUTRAL"]:
         lines.append(f"- **{item['symbol']}** — {item['direction']}; trigger {item['trigger']}; "
                      f"invalidation {item['invalidation']}; targets {item['targets']}")
-    lines += ["", "## Intraday playbook", ""]
-    for item in report["intraday_playbook"]:
+    lines += ["", "## Top swing setups", ""]
+    for item in [x for x in report["swing_playbook"] if x["direction"] != "NEUTRAL"]:
         lines.append(f"- **{item['symbol']}** — {item['direction']}; trigger {item['trigger']}; "
                      f"invalidation {item['invalidation']}; targets {item['targets']}")
-    lines += ["", "## Options observations", ""]
+    lines += ["", "## Options positioning observations", ""]
     for item in report["options_intelligence"]:
+        positioning = item["positioning_summary"]
+        quality = item["data_quality"]
         lines.append(f"- **{item['symbol']} {item['expiration']}** — {item['contracts_observed']} contracts; "
-                     f"{item['liquid_contracts']} passed the first-pass liquidity screen.")
-    if report["data_errors"]:
-        lines += ["", "## Data limitations", ""] + [f"- {item}" for item in report["data_errors"]]
+                     f"{item['liquid_contracts']} passed; call/put OI {positioning['call_open_interest']}/"
+                     f"{positioning['put_open_interest']}; call/put volume {positioning['call_trade_volume']}/"
+                     f"{positioning['put_trade_volume']}; stale quotes {quality['stale_quotes']}; "
+                     f"missing quote timestamps {quality['missing_quote_timestamps']}.")
+    warnings = list(report["data_quality"].get("warnings", []))
+    warnings += [str(item) for item in report["data_errors"]]
+    lines += ["", "## Data-quality warnings", ""]
+    lines += ([f"- {item}" for item in warnings] if warnings else ["- None."])
     lines += ["", "No trade execution is implemented. Observations are research inputs, not orders.", ""]
     return "\n".join(lines)
 

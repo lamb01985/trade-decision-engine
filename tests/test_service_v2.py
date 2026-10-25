@@ -41,10 +41,15 @@ def test_permission_to_trade_follows_standardized_decision_action():
 def test_market_scan_reports_freshness_for_evaluated_symbols(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
+    import app.freshness as freshness_module
+    import app.service as service_module
+    from app.freshness import MarketSession
     from app.universe import UniverseSelection
     from tests.test_alerts import analysis
 
     async def scenario():
+        monkeypatch.setattr(freshness_module, "market_session", lambda now=None: MarketSession.REGULAR)
+        monkeypatch.setattr(service_module, "market_session", lambda now=None: MarketSession.REGULAR)
         service = AnalysisService(FakeProvider())
         fresh = analysis("NVDA")
         stale = analysis("AMD")

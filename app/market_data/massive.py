@@ -224,7 +224,7 @@ class MassiveMarketDataProvider(MarketDataProvider):
     async def get_active_option_contracts(self, underlying_symbol: str, as_of: date) -> list[dict]:
         """Return listed, unexpired option contract metadata for expiration discovery."""
         symbol = underlying_symbol.strip().upper()
-        payload = await self._get_payload("/v3/reference/options/contracts", {
+        payload = await self._get_paginated_payload("/v3/reference/options/contracts", {
             "underlying_ticker": symbol,
             "expiration_date.gte": as_of.isoformat(),
             "expired": "false",
@@ -238,7 +238,7 @@ class MassiveMarketDataProvider(MarketDataProvider):
                                          strike_low: float, strike_high: float) -> list[dict]:
         """Return one bounded expiration-chain snapshot with provider-returned options fields."""
         symbol = underlying_symbol.strip().upper()
-        payload = await self._get_payload(f"/v3/snapshot/options/{symbol}", {
+        payload = await self._get_paginated_payload(f"/v3/snapshot/options/{symbol}", {
             "expiration_date": expiration_date,
             "strike_price.gte": strike_low,
             "strike_price.lte": strike_high,
