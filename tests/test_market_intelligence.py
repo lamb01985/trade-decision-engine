@@ -103,7 +103,7 @@ def test_options_liquidity_rejects_missing_or_stale_fields_instead_of_coercing_t
     assert contract["open_interest"] is None
     assert contract["volume"] is None
     assert contract["liquidity_pass"] is False
-    assert {"stale_quote", "missing_open_interest"} <= set(contract["liquidity_failures"])
+    assert {"stale_quote", "missing_open_interest", "missing_trade_volume"} <= set(contract["liquidity_failures"])
 
 
 def test_market_map_is_reproducible_and_persists_sources_reports_and_hypotheses(tmp_path):

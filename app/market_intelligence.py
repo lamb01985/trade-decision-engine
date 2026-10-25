@@ -388,7 +388,10 @@ def options_report(symbol: str, snapshot: dict, expiration: str, chain: list[dic
             failures.append("stale_quote"); stale_quote += 1
         if not isinstance(oi, (int, float)):
             failures.append("missing_open_interest"); missing_oi += 1
-        if not isinstance(volume, (int, float)): missing_volume += 1
+        if not isinstance(volume, (int, float)):
+            failures.append("missing_trade_volume"); missing_volume += 1
+        elif volume <= 0:
+            failures.append("no_observed_trade_volume")
         if isinstance(spread_pct, (int, float)) and spread_pct > 10:
             failures.append("spread_above_10_pct")
         if isinstance(oi, (int, float)) and oi < 100:
@@ -438,7 +441,7 @@ def options_report(symbol: str, snapshot: dict, expiration: str, chain: list[dic
             "contracts": rows,
             "observations": ["Open interest is provider-returned prior-session positioning, not trade volume",
               "Trade volume is provider-returned current/latest-session contract volume",
-              "Liquidity requires OI >= 100, spread <= 10%, and a quote within 15 minutes of the underlying snapshot"],
+              "Liquidity requires OI >= 100, positive observed trade volume, spread <= 10%, and a quote within 15 minutes of the chain reference"],
             "estimates": ["Midpoint and spread percentage are calculated from the returned bid/ask"],
             "prohibited_inference": "No unusual or institutional activity is inferred."}
 
