@@ -122,11 +122,15 @@ def test_market_map_is_reproducible_and_persists_sources_reports_and_hypotheses(
     assert len(report["intraday_playbook"]) == 4
     assert len(report["swing_playbook"]) == 4
     assert {item["symbol"] for item in report["options_intelligence"]} == {"QQQ", "SPY"}
+    assert {item["symbol"] for item in report["options_flow_intelligence"]} == {"QQQ", "SPY"}
+    assert all(item["trade_flow"]["status"] == "UNAVAILABLE"
+               for item in report["options_flow_intelligence"])
     with sqlite3.connect(tmp_path / "intelligence.sqlite3") as connection:
         assert connection.execute("SELECT count(*) FROM source_batches").fetchone()[0] == 8
         stored = json.loads(connection.execute("SELECT report_json FROM intelligence_reports").fetchone()[0])
         assert stored["point_in_time_policy"].startswith("Only observations")
         assert connection.execute("SELECT count(*) FROM hypotheses").fetchone()[0] == 8
+        assert connection.execute("SELECT count(*) FROM option_contract_snapshots").fetchone()[0] == 2
 
 
 def test_outcomes_are_recorded_only_when_a_later_bar_exists(tmp_path):
