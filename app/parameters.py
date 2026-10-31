@@ -19,6 +19,7 @@ class EngineParameters:
     chase_threshold_atr: float = 1.0
     trigger_proximity_atr: float = 0.75
     minimum_structural_risk_reward: float = 1.50
+    minimum_structural_risk_atr: float = 0.40
     opposing_level_buffer_atr: float = 0.35
     atr_period: int = 14
     gap_detection_pct: float = 0.20

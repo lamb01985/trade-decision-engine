@@ -103,6 +103,7 @@ All values live in `app/parameters.py` and are shared by live/research logic:
 | chase_threshold_atr | 1.0 ATR | Maximum post-trigger extension |
 | trigger_proximity_atr | 0.75 ATR | Watching distance |
 | minimum_structural_risk_reward | 1.50 | Minimum target-1 R/R |
+| minimum_structural_risk_atr | 0.40 | Minimum structural stop distance; tighter stops are noise, not structure |
 | opposing_level_buffer_atr | 0.35 ATR | Reserved opposing-structure clearance |
 | atr_period | 14 | 5m ATR sample |
 | gap_detection_pct | 0.20% | Session-open gap boundary threshold |

@@ -11,7 +11,7 @@ from pathlib import Path
 
 ENGINE_VERSION = "2.0.0"
 SETUP_RULES_VERSION = "1.0.0"
-PARAMETER_VERSION = "1.0.0"
+PARAMETER_VERSION = "1.1.0"
 
 UNKNOWN = "unknown"
 _REPO_ROOT = Path(__file__).resolve().parent.parent

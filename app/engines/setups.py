@@ -233,8 +233,12 @@ def build_standard_decision(instrument: InstrumentAnalysis, levels: list[PriceLe
     invalidation, targets = _structure_targets(levels, chosen.trigger, chosen.direction)
     state = chosen.state
     rr = None
-    if invalidation is not None and targets[0] is not None:
-        risk = abs(chosen.trigger-invalidation)
+    risk = abs(chosen.trigger-invalidation) if invalidation is not None else None
+    # A stop this tight is noise rather than structure: it inflates structural R/R
+    # without describing a real invalidation. Such a setup is not exhausted, only
+    # unmappable, so it forms again rather than expiring.
+    risk_too_tight = bool(risk is not None and atr and risk < atr*parameters.minimum_structural_risk_atr)
+    if invalidation is not None and targets[0] is not None and not risk_too_tight:
         rr = abs(targets[0]-chosen.trigger)/risk if risk else None
     beyond = (price-chosen.trigger if chosen.direction == "LONG" else chosen.trigger-price)
     if state in {SetupProgress.TRIGGERED, SetupProgress.CONFIRMED} and beyond > atr*parameters.chase_threshold_atr:
@@ -244,6 +248,8 @@ def build_standard_decision(instrument: InstrumentAnalysis, levels: list[PriceLe
     target_space = abs((targets[0] or chosen.trigger)-chosen.trigger)
     if state in {SetupProgress.TRIGGERED, SetupProgress.CONFIRMED} and target_space <= atr*parameters.opposing_level_buffer_atr:
         state = SetupProgress.TOO_LATE
+    if risk_too_tight:
+        state = SetupProgress.FORMING
     if previous and previous.setup_family == chosen.family and previous.invalidation is not None:
         breached = price < previous.invalidation if previous.direction == "LONG" else price > previous.invalidation
         if breached:
@@ -257,6 +263,7 @@ def build_standard_decision(instrument: InstrumentAnalysis, levels: list[PriceLe
     elif state == SetupProgress.FORMING: action = ActionNow.WAIT
     missing = list(chosen.missing)
     if not complete_structure: missing.append("two structural targets and a mapped invalidation")
+    if risk_too_tight: missing.append(f"a structural stop of at least {parameters.minimum_structural_risk_atr:.2f} ATR")
     changes = ["WAIT FOR RETEST", "WAIT FOR NEXT LEVEL", "WAIT FOR NEW STRUCTURE"] if state == SetupProgress.TOO_LATE else [f"Completion or failure of {chosen.family.value} confirmation sequence"]
     changed_at = previous.state_changed_at if previous and previous.setup_family == chosen.family and previous.setup_state == state else now
     return StandardDecision(**base, direction=chosen.direction, setup_family=chosen.family, setup_state=state,
