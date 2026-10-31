@@ -4,7 +4,7 @@ import json
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.auth_client import EngineTestClient as TestClient, engine_security
 
 from app.evidence_analytics import (EvidenceAnalyticsError, build_evidence_artifact,
                                     canonical_json, persist_artifact)

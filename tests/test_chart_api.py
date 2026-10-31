@@ -1,6 +1,6 @@
 from datetime import date, datetime, timezone
 
-from fastapi.testclient import TestClient
+from tests.auth_client import EngineTestClient as TestClient, engine_security
 
 from app.main import app
 from app.market_data.base import MarketDataError

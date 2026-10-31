@@ -2,7 +2,7 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
-from fastapi.testclient import TestClient
+from tests.auth_client import EngineTestClient as TestClient, engine_security
 
 import app.main as main_module
 from app.background_scanner import HostedBackgroundScanner
