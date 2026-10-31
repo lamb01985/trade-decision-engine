@@ -7,7 +7,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
@@ -34,6 +34,7 @@ from app.excursion_analytics import (COHORT_KEYS as EXCURSION_COHORT_KEYS,
     SLICE_KEYS as EXCURSION_SLICE_KEYS, ExcursionAnalyticsError, build_excursion_artifact)
 from app.background_scanner import HostedBackgroundScanner
 from app.versioning import build_identity
+from app.security import EngineSecurityBoundary, legacy_configured, background_authorized
 
 logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)  # Never log provider URLs containing API credentials.
@@ -43,6 +44,14 @@ STATIC = Path(__file__).parent / "static"
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Validate before opening databases, constructing providers or starting work.
+    if (settings.hosted_scanner_enabled or settings.notifications_enabled) and not background_authorized():
+        raise RuntimeError('BACKGROUND_AUTHORIZATION_REQUIRED')
+    if not legacy_configured():
+        app.state.service = app.state.market_data_provider = None
+        app.state.persistence = app.state.notification_service = app.state.background_scanner = None
+        yield
+        return
     build = build_identity()
     logger.info("startup_build revision=%s ref=%s built_at=%s source=%s",
                 build["revision"], build["ref"], build["built_at"], build["source"])
@@ -106,7 +115,8 @@ async def lifespan(app: FastAPI):
         app.state.persistence.signal.close()
 
 
-app = FastAPI(title="Trade Decision Engine", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="Trade Decision Engine", version="2.0.0", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)
 if settings.cors_allowed_origins or settings.cors_allowed_origin_regex:
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_allowed_origins),
         allow_origin_regex=settings.cors_allowed_origin_regex,
@@ -157,7 +167,11 @@ async def internal_error(request: Request, exc: Exception) -> JSONResponse:
     logger.error("unhandled_api_error path=%s type=%s", request.url.path, type(exc).__name__)
     body = ErrorResponse(error=ErrorDetail(code=ApiErrorCode.INTERNAL_ERROR,
         message="The request could not be completed."), detail="The request could not be completed.")
-    return JSONResponse(status_code=500, content=body.model_dump(mode="json"))
+    headers = {'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'}
+    # ServerErrorMiddleware is outside user middleware, so protect its output too.
+    if request.method == 'HEAD':
+        return Response(status_code=500, headers=headers)
+    return JSONResponse(status_code=500, content=body.model_dump(mode="json"), headers=headers)
 
 
 @app.get("/", include_in_schema=False)
@@ -543,3 +557,7 @@ async def market_scanner(payload: MarketScanRequest, request: Request):
 async def market_scanner_v1(payload: MarketScanRequest, request: Request) -> ScannerResponse:
     legacy = await market_scanner(payload, request)
     return scanner_response(legacy)
+
+
+# Install last so admission surrounds latency/CORS middleware and all routes.
+app.add_middleware(EngineSecurityBoundary)

@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from fastapi.testclient import TestClient
+from tests.auth_client import EngineTestClient as TestClient, engine_security
 
 import app.main as main_module
 from app.config import DatabaseBackend

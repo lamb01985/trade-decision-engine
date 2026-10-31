@@ -4,7 +4,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from fastapi.testclient import TestClient
+from tests.auth_client import EngineTestClient as TestClient, engine_security
 
 from app.excursion_analytics import (MEASUREMENT_CONTRACT_VERSION, build_excursion_artifact,
                                      canonical_json, persist_artifact)
