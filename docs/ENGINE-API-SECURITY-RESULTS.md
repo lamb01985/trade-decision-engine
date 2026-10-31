@@ -39,3 +39,35 @@ A focused security PR must target a checkpoint of 2e16d4e, not main, so it does
 not present unrelated work as an approved production merge. Existing Node
 operator authentication remains unchanged; direct browser-to-engine legacy
 clients require a server relay with the new credentials before activation.
+
+## Verified protected deployment
+
+Preview URL: https://trade-decision-engine-j1a2wdy02-sarah-lambertsons-projects.vercel.app
+Deployment: dpl_HSTYGmeGz3tkznBS81AsHojUFcJz.
+Source implementation commit: 2a6187d8f8f1b7985b7762c2a7dd39b5a33ef4ab.
+Subsequent branch changes document results and disable automatic deployments
+for the two review branches; they do not change deployed application code.
+
+Vercel Authentication returned HTTP302 anonymously. Behind that boundary, 12
+hosted checks passed: minimal anonymous health, authenticated preview identity,
+empty HEAD, anonymous notification/research/scanner denial, read-write denial,
+admin live-service unavailable, disabled analysis, denied OpenAPI and wrong
+audience rejection. Every tested application response was no-store. Generated
+preview-only authentication tokens remained server-side/in memory and were not
+written to repository or CLI arguments. No Massive credential was provisioned.
+Temporary URL-scoped Vercel test access was revoked after verification.
+Python Production target remained dpl_7ExkVRtBBaVPQe4P37kEgduYyyRU at6200826;
+project protection policy remained all_except_custom_domains.
+
+TradeHub PR https://github.com/lamb01985/trade-hub-1/pull/6 contains only the
+verified 88fb367 patch, five files, against unchanged main74fa880. It was open
+and mergeable when checked; no merge occurred. Production remains88fb367 and
+the credential endpoint returns its exact410 retirement response. Its immutable
+URL is Vercel protected; the public production alias is not login protected.
+
+The Python review base is a checkpoint of2e16d4e plus only the branch-specific
+Git deployment guard. The PR intentionally does not target main. Root
+vercel.json disables Git-triggered deployments for those review branches only;
+manual security Preview packaging uses config/vercel.security-preview.json.
+No production branch/configuration is changed. A separately reviewed production
+port/rollout is still required to protect the existing public engine service.
