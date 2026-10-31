@@ -1,0 +1,47 @@
+[
+  {
+    "result": [
+      1,
+      "11111111-1111-1111-1111-111111111111",
+      0,
+      "GRANTED"
+    ],
+    "valid": true
+  },
+  {
+    "result": [
+      0,
+      "",
+      1,
+      "POLICY_MISMATCH"
+    ],
+    "valid": true
+  },
+  {
+    "result": [
+      true,
+      "11111111-1111-1111-1111-111111111111",
+      0,
+      "GRANTED"
+    ],
+    "valid": false
+  },
+  {
+    "result": [
+      1,
+      "wrong",
+      0,
+      "GRANTED"
+    ],
+    "valid": false
+  },
+  {
+    "result": [
+      0,
+      "",
+      -1,
+      "ACCOUNT_LIMIT"
+    ],
+    "valid": false
+  }
+]

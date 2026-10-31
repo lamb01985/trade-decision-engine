@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.intelligence_api import router as intelligence_router
 from app.config import settings
 from app.market_data.base import MarketDataError
 from app.market_data.massive import MassiveMarketDataProvider, log_configuration_metadata
@@ -110,6 +111,9 @@ if settings.cors_allowed_origins or settings.cors_allowed_origin_regex:
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.cors_allowed_origins),
         allow_origin_regex=settings.cors_allowed_origin_regex,
         allow_credentials=True, allow_methods=["GET", "POST", "PUT"], allow_headers=["Content-Type"])
+app.include_router(intelligence_router)
+from app.market_data.api import router as market_data_router
+app.include_router(market_data_router)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
@@ -199,7 +203,9 @@ async def readiness(request: Request) -> ReadinessResponse:
         signal_store = notification_store = database_ready
     background_scanner = getattr(request.app.state, "background_scanner", None)
     scanner_ready = background_scanner.ready() if background_scanner else not settings.hosted_scanner_enabled
-    return ReadinessResponse(ready=massive and database_ready and scanner_ready,
+    from app.market_data.api import configuration as market_data_configuration
+    unified_ready = not settings.market_data_unified_enabled or market_data_configuration()[0]
+    return ReadinessResponse(ready=massive and database_ready and scanner_ready and unified_ready,
         massive_configured=massive,
         pushover_configured=bool(settings.pushover_user_key and settings.pushover_app_token),
         signal_store_available=signal_store, notification_store_available=notification_store,

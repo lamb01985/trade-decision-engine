@@ -72,6 +72,14 @@ class Settings:
     db_pool_recycle_seconds: int = int(os.getenv("DB_POOL_RECYCLE_SECONDS", "300"))
     massive_api_key: str | None = os.getenv("MASSIVE_API_KEY") or None
     massive_base_url: str = os.getenv("MASSIVE_BASE_URL", "https://api.massive.com")
+    massive_budget_enforced: bool = os.getenv("MASSIVE_BUDGET_ENFORCED") == "true"
+    market_data_unified_enabled: bool = os.getenv("MARKET_DATA_UNIFIED_ENABLED") == "true"
+    market_data_service_url: str | None = os.getenv("MARKET_DATA_SERVICE_URL") or None
+    market_data_service_token: str | None = os.getenv("MARKET_DATA_SERVICE_TOKEN") or None
+    market_data_deployment_profile: str | None = os.getenv("MARKET_DATA_DEPLOYMENT_PROFILE") or None
+    massive_account_budget_scope: str | None = os.getenv("MASSIVE_ACCOUNT_BUDGET_SCOPE") or None
+    massive_requests_per_minute: int = int(os.getenv("MASSIVE_REQUESTS_PER_MINUTE", "5"))
+    massive_legacy_reserved_requests_per_minute: str | None = os.getenv("MASSIVE_LEGACY_RESERVED_REQUESTS_PER_MINUTE")
     log_level: str = os.getenv("LOG_LEVEL", "INFO")
     scanner_refresh_seconds: int = int(os.getenv("SCANNER_REFRESH_SECONDS", "300"))
     hosted_scanner_enabled: bool = _bool("HOSTED_SCANNER_ENABLED")

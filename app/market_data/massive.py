@@ -1,7 +1,12 @@
+import asyncio
+import contextvars
+import os
+import time
+import uuid
 import logging
 import re
 from datetime import date, datetime, timezone
-from urllib.parse import parse_qsl, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit, quote
 
 import httpx
 
@@ -9,6 +14,7 @@ from app.market_data.base import AggregateBatch, MarketDataError, MarketDataProv
 from app.models import Bar
 
 logger = logging.getLogger(__name__)
+_live_context = contextvars.ContextVar("market_data_live_context", default=None)
 _CREDENTIAL_PATTERN = re.compile(
     r"(?i)(api[_-]?key|access[_-]?token|authorization)(\s*[=:]\s*)([^\s&,;]+)"
 )
@@ -16,10 +22,15 @@ _CREDENTIAL_PATTERN = re.compile(
 
 def _safe_response_excerpt(response: httpx.Response, api_key: str, limit: int = 300) -> str:
     """Return bounded provider detail with credential-like values removed."""
-    excerpt = response.text[:limit].replace("\r", " ").replace("\n", " ")
+    # Redact before truncation: a boundary must not disclose a secret prefix.
+    excerpt = response.text
     if api_key:
-        excerpt = excerpt.replace(api_key, "[REDACTED]")
-    return _CREDENTIAL_PATTERN.sub(r"\1\2[REDACTED]", excerpt)
+        import json
+        for secret in (api_key, quote(api_key, safe=''), json.dumps(api_key)[1:-1]):
+            excerpt = excerpt.replace(secret, '[REDACTED]')
+    excerpt = _CREDENTIAL_PATTERN.sub(r"\1\2[REDACTED]", excerpt)
+    return excerpt[:limit].replace("\r", " ").replace("\n", " ")
+
 
 
 def log_configuration_metadata(api_key: str | None, base_url: str) -> None:
@@ -44,8 +55,33 @@ class MassiveMarketDataProvider(MarketDataProvider):
 
     async def _get_payload(self, path: str, params: dict[str, str | int | bool]) -> dict:
         request_params = {**params, "apiKey": self._api_key}
+        context = _live_context.get()
+        unified = os.getenv("MARKET_DATA_UNIFIED_ENABLED") == "true"
+        lease = None
+        budget = None
+        if unified or context or os.getenv("MASSIVE_BUDGET_ENFORCED") == "true":
+            from app.market_data.budget import configured_budget, BudgetUnavailable
+            try:
+                budget = configured_budget()
+                scope = os.getenv("MASSIVE_ACCOUNT_BUDGET_SCOPE", "")
+                role = "new" if context else "legacy"
+                if context and time.monotonic() >= context:
+                    raise MarketDataError("REFRESH_DEADLINE")
+                admission = await budget.admit(scope, str(uuid.uuid4()), role, 10000 if context else 20000)
+                if not admission["granted"]:
+                    if hasattr(budget, "client"):
+                        await budget.client.aclose()
+                    raise MarketDataError("DEPENDENCY_UNAVAILABLE" if admission.get("reason") in {"POLICY_MISMATCH", "DUPLICATE_ATTEMPT"} else "BUDGET_EXHAUSTED")
+                lease = admission["lease_id"]
+            except BudgetUnavailable:
+                if budget is not None and hasattr(budget, "client"):
+                    await budget.client.aclose()
+                raise MarketDataError("DEPENDENCY_UNAVAILABLE") from None
         try:
-            response = await self._client.get(path, params=request_params)
+            timeout = min(10.0, context-time.monotonic()) if context else 20.0
+            if timeout <= 0:
+                raise MarketDataError("REFRESH_DEADLINE")
+            response = await asyncio.wait_for(self._client.get(path, params=request_params, **({"timeout": timeout} if context else {})), timeout=timeout)
             logger.debug("Massive response path=%s status_code=%s", path, response.status_code)
             response.raise_for_status()
             payload = response.json()
@@ -57,16 +93,83 @@ class MassiveMarketDataProvider(MarketDataProvider):
                 response.request.url.path,
                 _safe_response_excerpt(response, self._api_key),
             )
-            raise MarketDataError("Massive market-data request failed") from exc
-        except (httpx.HTTPError, ValueError) as exc:
+            error = MarketDataError("PROVIDER_NOT_ENTITLED" if response.status_code == 403 else "PROVIDER_RATE_LIMIT" if response.status_code == 429 else "UPSTREAM_FAILURE")
+            error.status_code = response.status_code
+            raise error from None
+        except (httpx.HTTPError, ValueError, asyncio.TimeoutError) as exc:
             # httpx exception text includes the full request URL. Since the
             # provider credential is a query parameter, never log the
             # exception object or traceback here.
             logger.warning("Massive request failed for %s (%s)", path, type(exc).__name__)
             raise MarketDataError("Massive market-data request failed") from exc
+        finally:
+            if lease:
+                try:
+                    await budget.release(scope, lease)
+                except Exception:
+                    pass  # Lease expires; never refund an attempted request.
+                finally:
+                    if hasattr(budget, "client"):
+                        await budget.client.aclose()
+        if not isinstance(payload, dict):
+            raise MarketDataError("UPSTREAM_MALFORMED")
         if payload.get("status") in {"ERROR", "NOT_AUTHORIZED"}:
-            raise MarketDataError(payload.get("error") or payload.get("message") or "Massive API error")
+            raise MarketDataError("PROVIDER_NOT_ENTITLED" if payload.get("status") == "NOT_AUTHORIZED" else "UPSTREAM_FAILURE")
         return payload
+
+    async def get_bounded(self, path, params, deadline=None, paginate=False):
+        """Separate bounded adapter; legacy pagination is deliberately unchanged."""
+        deadline = deadline or time.monotonic() + 30
+        token = _live_context.set(deadline)
+        items, pages, seen, cursor = [], 0, set(), False
+        error = None
+        original_path = path
+        original_params = dict(params)
+        try:
+            for _ in range(10):
+                if time.monotonic() >= deadline:
+                    error = 'REFRESH_DEADLINE'
+                    break
+                payload = await self._get_payload(path, params)
+                pages += 1
+                if paginate:
+                    expected_symbol = original_path.split('/ticker/',1)[1].split('/',1)[0]
+                    if payload.get('ticker') != expected_symbol:
+                        raise MarketDataError('IDENTITY_MISMATCH')
+                    requested_adjusted = str(original_params.get('adjusted', 'true')).lower() == 'true'
+                    if type(payload.get('adjusted')) is not bool or payload['adjusted'] is not requested_adjusted:
+                        raise MarketDataError('ADJUSTMENT_MISMATCH')
+                page = payload.get('results', []) if paginate else [payload.get('ticker')]
+                if not isinstance(page, list) or any(not isinstance(row, dict) for row in page):
+                    raise MarketDataError('UPSTREAM_MALFORMED')
+                items.extend(page)
+                cursor = bool(payload.get('next_url')) if paginate else False
+                if not cursor:
+                    if paginate and len(page) >= 50000:
+                        error = 'PAGE_LIMIT'
+                    break
+                next_url = payload['next_url']
+                parsed = urlsplit(next_url)
+                base = urlsplit(str(self._client.base_url))
+                if (parsed.scheme, parsed.netloc, parsed.path) != (base.scheme, base.netloc, original_path) or next_url in seen or parsed.fragment:
+                    raise MarketDataError('INVALID_CURSOR')
+                seen.add(next_url)
+                path = parsed.path
+                query = [(key,value) for key,value in parse_qsl(parsed.query) if key.lower() != 'apikey']
+                if len({key for key,value in query}) != len(query):
+                    raise MarketDataError('INVALID_CURSOR')
+                params = dict(query)
+                if any(key in params and str(params[key]) != str(value) for key,value in original_params.items()):
+                    raise MarketDataError('INVALID_CURSOR')
+                params = {**original_params, **params}
+            else:
+                error = 'PAGE_LIMIT'
+        except MarketDataError as exc:
+            error = str(exc) if str(exc) in {'PROVIDER_NOT_ENTITLED','BUDGET_EXHAUSTED','DEPENDENCY_UNAVAILABLE','REFRESH_DEADLINE','INVALID_CURSOR','PAGE_LIMIT','IDENTITY_MISMATCH','ADJUSTMENT_MISMATCH'} else 'UPSTREAM_FAILURE'
+        finally:
+            _live_context.reset(token)
+        return dict(items=items, pages_read=pages, pagination_complete=error is None and not cursor,
+                    next_cursor_present=cursor, requested_window=None, returned_window=None, error=error)
 
     async def _get_paginated_payload(self, path: str,
                                      params: dict[str, str | int | bool]) -> dict:

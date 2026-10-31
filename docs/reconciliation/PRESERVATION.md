@@ -1,0 +1,9 @@
+# Preservation and reconciliation record
+
+Original checkouts only: trade-hub-1 and trade-decision-engine. Protected-preview worktrees are not integration bases. Private backups were created before changes, outside Git under ~/TradeHub-preservation, with file hashes, binary patches, source index and HEAD records. Credentials/private data are permission-restricted and are never staged.
+
+All modified/untracked files were read and classified before staging. Exclusions: .env/local secrets, Python bytecode/caches, private reports, generated data/local_intelligence reports/locks, virtual environments, node_modules, build output and screenshots. JSON contracts and synthetic test fixtures are reviewed source dependencies, not provider-data exports. Secret-pattern scan found no real key/token literals; server-managed compatibility sentinels and synthetic test credentials are not secrets. The local review script's static development password was replaced with a random ephemeral value; its original is preserved in the private backup.
+
+Frontend checkpoint preserves security, EGM contracts, historical intelligence, provider confinement and M2 work. Python checkpoints separate pre-existing strategy-rule edits, data/intelligence work and the pre-existing deployment workflow. Workflow preservation does not execute it; no push/merge/deployment is authorized. Reconciliation must preserve all intended capabilities, not import the preview candidate's API deletions.
+
+Remote frontend main adds session research at74fa880. PR1 adds options and Prep behavior; PR3 adds quote quality. They overlap local App, hooks, provider helper and transport. Retain authenticated key tombstone, exact allowlist/query validation, shared budgets, cancellation, readonly Unified boundaries and provider/app-auth distinction while incorporating reviewed behavior. Unresolved conflicts must be documented and tested. No PR merge, production setting change, credential rotation or force-push.

@@ -52,3 +52,6 @@ data/market_intelligence_reports/
 *.diff
 *.zip
 How Can I Enhance My Trading Engine Tool_/
+
+# Generated local intelligence reports are preserved privately, never committed.
+data/local_intelligence/

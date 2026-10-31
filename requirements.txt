@@ -6,3 +6,13 @@ pytest==8.3.5
 SQLAlchemy==2.0.41
 alembic==1.16.4
 psycopg[binary]==3.2.9
+exchange_calendars==4.13.2
+numpy==2.2.6
+pandas==2.3.3
+toolz==1.2.0
+pyluach==2.3.0
+korean_lunar_calendar==0.4.0
+tzdata==2026.3
+pytz==2026.3.post1
+python-dateutil==2.9.0.post0
+six==1.17.0
