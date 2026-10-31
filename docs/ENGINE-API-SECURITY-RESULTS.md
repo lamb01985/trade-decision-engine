@@ -71,3 +71,29 @@ vercel.json disables Git-triggered deployments for those review branches only;
 manual security Preview packaging uses config/vercel.security-preview.json.
 No production branch/configuration is changed. A separately reviewed production
 port/rollout is still required to protect the existing public engine service.
+
+## Final public exposure checks
+
+All four legacy cockpit URLs below returned anonymous HTTP200; none is the new
+protected security preview. They were not modified or disabled:
+
+- https://trade-decision-cockpit-preview-90rncy7on.vercel.app
+- https://trade-decision-cockpit-preview-fhqw89usb.vercel.app
+- https://trade-decision-cockpit-preview-r4uyg33id.vercel.app
+- https://trade-decision-cockpit-preview-mdva1pkwq.vercel.app
+
+The last URL is an older production attempt whose deployment metadata reports
+ERROR despite the reachable HTML. No claim of live backend operation follows
+from these pages. No notification, analysis or write operation was invoked on
+the historical services. The existing public Python production notification
+settings GET returned200; its write exposure is established by code but was
+not exercised remotely. Closing these exposures needs separate owner approval.
+
+Python draft PR: https://github.com/lamb01985/trade-decision-engine/pull/1,
+base checkpoint/edgeiq-alpha-security-base (62b8688). It is review-only and must
+not be mistaken for a production main PR. The preview implementation remains
+2a6187d; later commits change documentation/Git review-branch guards only.
+Final checks found no automatic Python deployment after publishing guarded
+branches. The temporary PostgreSQL test container was stopped. Existing local
+user services were left unchanged. Original EdgeIQ frontend remains atc80c25d
+with its original modified Thesis plan; static UI preview remains clean2049313.
