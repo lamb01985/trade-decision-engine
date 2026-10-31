@@ -114,6 +114,8 @@ if settings.cors_allowed_origins or settings.cors_allowed_origin_regex:
 app.include_router(intelligence_router)
 from app.market_data.api import router as market_data_router
 app.include_router(market_data_router)
+from app.thesis.api import router as thesis_router
+app.include_router(thesis_router)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 

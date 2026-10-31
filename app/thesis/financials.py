@@ -50,11 +50,21 @@ def annual(row):
         return False
 
 
+def source_rows(payload, alias, unit):
+    facts=payload.get('facts', {})
+    if not isinstance(facts,dict) or not isinstance(facts.get('us-gaap',{}),dict):raise ValueError('INVALID_FACTS')
+    concept=facts.get('us-gaap',{}).get(alias,{})
+    if not isinstance(concept,dict) or not isinstance(concept.get('units',{}),dict):raise ValueError('INVALID_CONCEPT')
+    rows=concept.get('units',{}).get(unit,[])
+    if not isinstance(rows,list) or any(not isinstance(row,dict) for row in rows):raise ValueError('INVALID_FACT_ROWS')
+    return rows
+
+
 def extract(payload, key, start, end, as_of, cik, fixture=False):
     unit = 'USD/shares' if key == 'eps' else 'USD'
     candidates = []
     for alias in CONCEPTS[key]:
-        rows = payload.get('facts', {}).get('us-gaap', {}).get(alias, {}).get('units', {}).get(unit, [])
+        rows = source_rows(payload,alias,unit)
         for row in rows:
             if not eligible(row, as_of) or row['end'] != end:
                 continue
@@ -93,7 +103,7 @@ def company_report(payload, issuer, as_of, fixture=False):
     as_of = day(as_of) if isinstance(as_of, str) else as_of
     periods = set()
     for alias in CONCEPTS['revenue']:
-        for row in payload.get('facts', {}).get('us-gaap', {}).get(alias, {}).get('units', {}).get('USD', []):
+        for row in source_rows(payload,alias,'USD'):
             if eligible(row, as_of) and annual(row):
                 periods.add((row['start'], row['end']))
     # Different annual starts for the same end are ambiguous; never choose arbitrarily.
